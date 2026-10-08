@@ -28,7 +28,9 @@ class TestSecretString(unittest.TestCase):
         self.assertNotIn(REAL, repr(s))
         self.assertNotIn(REAL, str(s))
         self.assertNotIn(REAL, f"{s}")
-        self.assertNotIn(REAL, "{:s}".format(s))
+        # Deliberate: a format SPEC, which str.__format__ handles without
+        # calling __str__. An f-string would not exercise that path.
+        self.assertNotIn(REAL, "{:s}".format(s))  # noqa: UP032
 
     def test_repr_inside_a_tuple_is_redacted(self):
         # This is the traceback shape: repr() of an exception's arguments.

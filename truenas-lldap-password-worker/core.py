@@ -61,7 +61,6 @@ class ChangeResult:
     truenas_applicable: bool = False
     partial: bool = False
     reverted: bool = False
-    message: str = ""
 
     @property
     def ok(self) -> bool:
@@ -265,11 +264,9 @@ def change_password(
         except ChangeError:
             raise
         except Exception as e:
-            # Detail is logged, not shown: the user gets a generic message.
+            # Detail is logged, not shown: the user gets the text for the kind.
             raise ChangeError(
-                f"nothing was changed: the NAS password could not be set ({e}). "
-                "Your current password still works; please try again.",
-                ErrorKind.TRANSIENT,
+                operator_text("nas_password_set_failed", e=e), ErrorKind.TRANSIENT
             ) from None
 
     try:
@@ -285,18 +282,24 @@ def change_password(
                 result.truenas = False
                 result.partial = False
                 result.reverted = True
-            except Exception:
-                result.message = (
-                    "Your password was changed on the NAS but not in the "
-                    "directory. Your directory password is still your previous "
-                    "one; sign in with it and try again."
-                )
-                raise ChangeError(result.message, ErrorKind.PARTIAL) from None
+            except Exception as revert_error:
+                raise ChangeError(
+                    operator_text("nas_set_but_directory_failed", e=revert_error),
+                    ErrorKind.PARTIAL,
+                ) from None
         raise ChangeError(
-            result.message or str(e), ErrorKind.PARTIAL if result.partial else e.kind
+            str(e), ErrorKind.PARTIAL if result.partial else e.kind
         ) from None
 
-    ldap_client.bind(username, new_password)
+    try:
+        ldap_client.bind(username, new_password)
+    except ChangeError:
+        # Both stores accepted the password, so the new one is live even though
+        # the check bind failed. Say so: guessing which password to use is worse
+        # than being told to try the new one.
+        raise ChangeError(
+            operator_text("changed_but_unverified"), ErrorKind.UNVERIFIED
+        ) from None
     return result
 
 

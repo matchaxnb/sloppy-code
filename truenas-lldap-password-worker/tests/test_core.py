@@ -18,6 +18,7 @@ import unittest
 # Make core.py importable regardless of where unittest is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import messages  # noqa: E402
 from core import ChangeError, change_password  # noqa: E402
 from messages import ErrorKind  # noqa: E402
 from tests.fakes import FakeLdapClient, FakeTrueNasClient, _CallLog  # noqa: E402
@@ -135,11 +136,41 @@ class TestLldapRejectsNewAfterTrueNasSuccess(unittest.TestCase):
         self.assertIs(ctx.exception.kind, ErrorKind.PARTIAL)
         self.assertIn("directory", str(ctx.exception).lower())
 
+    def test_reverted_failure_keeps_the_directory_kind(self):
+        # lldap refused, the NAS was put back: the user is told why lldap refused.
+        ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
+        with self.assertRaises(ChangeError) as ctx:
+            change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
+        self.assertIs(ctx.exception.kind, ErrorKind.POLICY)
+        self.assertNotIn("directory password is still", str(ctx.exception))
+
     def test_old_password_still_works(self):
         ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
         with self.assertRaises(ChangeError):
             change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
         ldap.bind(USER, OLD)
+
+
+class TestVerifyBindFailsAfterBothWrites(unittest.TestCase):
+    """Both stores accepted the password but the check bind failed.
+
+    The password IS changed, so the user must be told that rather than given a
+    generic error and left guessing which password works.
+    """
+
+    def test_reported_as_unverified(self):
+        ldap, tn, _ = _make(ldap_kw={"reject_verify_bind": True})
+        with self.assertRaises(ChangeError) as ctx:
+            change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
+        self.assertIs(ctx.exception.kind, ErrorKind.UNVERIFIED)
+
+    def test_user_is_not_told_the_credentials_were_wrong(self):
+        ldap, tn, _ = _make(ldap_kw={"reject_verify_bind": True})
+        with self.assertRaises(ChangeError) as ctx:
+            change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
+        self.assertIsNot(ctx.exception.kind, ErrorKind.INVALID_CREDENTIALS)
+        # And the suggested next step names the new password.
+        self.assertIn("new password", messages.error_text(ctx.exception.kind))
 
     def test_truenas_was_changed(self):
         ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})

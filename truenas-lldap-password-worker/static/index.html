@@ -168,6 +168,18 @@
       for (const [k, el] of Object.entries(steps)) el.classList.toggle("active", k === step);
     }
 
+    // Every string this page can display. Fallbacks only: the server normally
+    // supplies the text, so a translation effort has one place to work.
+    const STRINGS = {
+      couldNotContinue: "Could not continue.",
+      unreachable: "Could not reach the server.",
+      mismatch: "The new password and confirmation do not match.",
+      changed: "Your password has been changed.",
+      partial: "Only one password store was updated.",
+      couldNotChange: "Could not change the password.",
+      badCredentials: "Invalid username or password.",
+    };
+
     function say(kind, text) {
       msg.className = "msg " + kind;
       msg.textContent = text;
@@ -205,7 +217,7 @@
       setBusy(true);
       try {
         const { data } = await post("/auth/user", { username });
-        if (!data.ticket) { say("error", data.error || "Could not continue."); return; }
+        if (!data.ticket) { say("error", data.error || STRINGS.couldNotContinue); return; }
         ticket = data.ticket;
         $("who").textContent = username;
         $("who2").textContent = username;
@@ -213,7 +225,7 @@
         show("pass");
         $("password").focus();
       } catch (_) {
-        say("error", "Could not reach the server.");
+        say("error", STRINGS.unreachable);
       } finally {
         setBusy(false);
       }
@@ -242,7 +254,7 @@
         }
         // One message for every failure: unknown user and wrong password are
         // deliberately the same.
-        say("error", data.error || "Invalid username or password.");
+        say("error", data.error || STRINGS.badCredentials);
         $("password").value = "";
         $("password").focus();
         if (data.ticket) {
@@ -255,7 +267,7 @@
           show("user");
         }
       } catch (_) {
-        say("error", "Could not reach the server.");
+        say("error", STRINGS.unreachable);
       } finally {
         setBusy(false);
       }
@@ -278,7 +290,7 @@
       const confirm = $("confirm").value;
 
       if (newPassword !== confirm) {
-        say("error", "The new password and confirmation do not match.");
+        say("error", STRINGS.mismatch);
         return;
       }
 
@@ -286,19 +298,21 @@
       try {
         const { data } = await post("/api/change", { session, new_password: newPassword });
         if (data.ok) {
-          say("success", data.message || "Your password has been changed.");
+          say("success", data.message || STRINGS.changed);
           session = null;
           $("new_password").value = "";
           $("confirm").value = "";
-        } else if (data.partial) {
-          // One store changed, the other did not: the user must understand
-          // that their OLD password still works and they should retry.
-          say("partial", data.error || "Only one password store was updated.");
+        } else if (data.partial || data.unverified) {
+          // The change landed somewhere it may not have been confirmed, or
+          // only one store took it. Either way the user must be told which
+          // password to try, so this gets the warning styling, not a plain
+          // error.
+          say("partial", data.error || STRINGS.partial);
         } else {
-          say("error", data.error || "Could not change the password.");
+          say("error", data.error || STRINGS.couldNotChange);
         }
       } catch (_) {
-        say("error", "Could not reach the server.");
+        say("error", STRINGS.unreachable);
       } finally {
         setBusy(false);
       }

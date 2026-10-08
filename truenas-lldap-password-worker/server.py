@@ -318,8 +318,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.UNAUTHORIZED,
                 {
+                    # One message for every stage-2 failure: a variant would
+                    # reintroduce account enumeration.
                     "ok": False,
-                    "error": srv.gate.identical_failure(),
+                    "error": messages.error_text(ErrorKind.INVALID_CREDENTIALS),
                     "retry_after": int(wait) + 1,
                     "ticket": retry_ticket,
                 },
@@ -385,6 +387,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": False,
                     "error": messages.error_text(e.kind),
                     "partial": e.kind is ErrorKind.PARTIAL,
+                    "unverified": e.kind is ErrorKind.UNVERIFIED,
                 },
             )
             return

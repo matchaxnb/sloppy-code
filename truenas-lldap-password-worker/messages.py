@@ -33,6 +33,7 @@ class ErrorKind(enum.Enum):
     TRANSIENT = "transient"
     POLICY = "policy"
     PARTIAL = "partial"
+    UNVERIFIED = "unverified"
     NOT_AUTHENTICATED = "not_authenticated"
     VALIDATION = "validation"
     UNKNOWN = "unknown"
@@ -53,6 +54,10 @@ ERRORS: dict[ErrorKind, str] = {
         "Your password was changed on the NAS but not in the directory. Your "
         "directory password is still your previous one; sign in with it and try "
         "again."
+    ),
+    ErrorKind.UNVERIFIED: (
+        "Your password was changed, but it could not be confirmed. Try signing in "
+        "with your new password; if that fails, use your previous one."
     ),
     ErrorKind.NOT_AUTHENTICATED: "Your session has ended. Please sign in again.",
     ErrorKind.VALIDATION: (
@@ -84,6 +89,16 @@ OPERATOR: dict[str, str] = {
     "no_wss_url": "PW_TN_WSS is not set; the TrueNAS API URL is required",
     "no_ldap_uri": "PW_LDAP_URI is not set; the directory endpoint is required",
     "no_ldap_base": "PW_LDAP_BASE is not set; the directory base DN is required",
+    "nas_password_set_failed": (
+        "nothing was changed: the NAS password could not be set ({e}). "
+        "Your current password still works; please try again."
+    ),
+    "nas_set_but_directory_failed": (
+        "the NAS password was set but the directory refused the new password ({e})"
+    ),
+    "changed_but_unverified": (
+        "both stores accepted the new password but the check bind failed"
+    ),
 }
 
 
@@ -97,6 +112,6 @@ def text(key: str, **fields: object) -> str:
     return MESSAGES[key].format(**fields)
 
 
-def operator_text(key: str) -> str:
-    """A startup/config message for whoever is fixing the deployment."""
-    return OPERATOR[key]
+def operator_text(key: str, **fields: object) -> str:
+    """An operator-facing message: a startup/config fault, or a logged reason."""
+    return OPERATOR[key].format(**fields)

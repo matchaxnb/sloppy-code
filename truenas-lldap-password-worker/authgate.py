@@ -294,14 +294,5 @@ class Gate:
             self._sessions.pop(tok, None)
 
     @staticmethod
-    def identical_failure() -> str:
-        """The one message used for every stage-2 failure.
-
-        Covers both "no such user" and "wrong password"; a variant would
-        reintroduce account enumeration.
-        """
-        return "Invalid username or password."
-
-    @staticmethod
     def constant_time_compare(a: str, b: str) -> bool:
         return hmac.compare_digest(a.encode(), b.encode())

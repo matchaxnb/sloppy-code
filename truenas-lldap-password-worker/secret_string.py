@@ -43,7 +43,7 @@ class SecretString(str):
 
     def reveal(self) -> str:
         """Synonym for `value`, for readability at call sites."""
-        return self[:]
+        return self.value
 
 
 def json_response(payload: dict) -> bytes:

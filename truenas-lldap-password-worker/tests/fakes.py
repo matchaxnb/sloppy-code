@@ -8,6 +8,7 @@ the live password, so bind() succeeds only with the current one.
 from __future__ import annotations
 
 from core import ChangeError
+from messages import ErrorKind
 
 
 class _CallLog:
@@ -56,7 +57,7 @@ class FakeLdapClient:
             raise ChangeError("verification bind failed")
         # Normal behaviour: only the live password binds.
         if password != self.current_password:
-            raise ChangeError("invalid credentials")
+            raise ChangeError("invalid credentials", ErrorKind.INVALID_CREDENTIALS)
 
     def set_password(self, username, old_password, new_password):
         self._log.record(("set_password", username, old_password, new_password))
@@ -64,7 +65,8 @@ class FakeLdapClient:
         if self.reject_new_password:
             raise ChangeError(
                 "lldap rejected the new password (policy, or the current "
-                "password is wrong)"
+                "password is wrong)",
+                ErrorKind.POLICY,
             )
         # On success the live password flips: old stops working, new binds.
         self.current_password = new_password
@@ -119,5 +121,6 @@ class FakeTrueNasClient:
             raise ChangeError(
                 "nothing was changed: the NAS password could not be set "
                 "(nas unreachable). Your current password still works; "
-                "please try again."
+                "please try again.",
+                ErrorKind.TRANSIENT,
             )
