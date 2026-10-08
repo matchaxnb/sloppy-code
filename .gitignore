@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+build/
+dist/
+
+# Virtual envs
+venv/
+.venv/
+env/
+
+# Secrets must never be committed
+*.key
+*.pem
+.env
+.env.*
+secrets/
+*.secret
+
+# Editor / OS noise
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

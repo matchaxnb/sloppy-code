@@ -1,0 +1,20 @@
+# Runtime dependencies for the lldap <-> TrueNAS password-change worker.
+# ldap3 is pure-python (no libldap headers, no compiler) -- see core.py.
+ldap3==2.9.1
+
+# truenas_api_client is NOT on PyPI under any spelling (SPEC 3.5; all 404).
+# It ships inside the NAS at /usr/lib/python3/dist-packages/truenas_api_client;
+# for the worker image it is built from its standalone source repo
+# (https://github.com/truenas/api_client) in the Dockerfile builder stage and
+# installed here from the local wheel via --find-links.
+#
+# Pinned to the tag matching the target host's TrueNAS version (25.04.2.6) so
+# the client behaviour in the image matches the server actually running there.
+# A floating branch (@master) would drift AHEAD of the server -- wrong
+# direction for an API client. Its only runtime dependency is the pure-python
+# websocket-client.
+#
+# core.py degrades gracefully if this import fails (TrueNasPasswordClient._connect
+# raises a user-safe ChangeError), so an offline build that cannot reach GitHub
+# can drop this line and still build.
+truenas_api_client

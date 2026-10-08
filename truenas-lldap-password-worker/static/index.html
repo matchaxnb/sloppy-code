@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Account</title>
+  <style>
+    :root {
+      --bg: #12141a;
+      --surface: #1b1e26;
+      --border: #2c313d;
+      --fg: #e6e8ee;
+      --muted: #9aa1b1;
+      --accent: #4c8dff;
+      --danger: #ff6b6b;
+      --warn: #ffb454;
+      --ok: #4ec97a;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      color: var(--fg);
+      font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      padding: 1.5rem;
+    }
+
+    main {
+      width: 100%;
+      max-width: 26rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.75rem;
+    }
+
+    h1 { margin: 0 0 .25rem; font-size: 1.25rem; }
+    .sub { margin: 0 0 1.25rem; color: var(--muted); font-size: .875rem; }
+
+    label { display: block; margin: .875rem 0 .35rem; font-size: .875rem; color: var(--muted); }
+    input {
+      width: 100%;
+      padding: .6rem .7rem;
+      background: var(--bg);
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font: inherit;
+    }
+    input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+    button {
+      width: 100%;
+      margin-top: 1.25rem;
+      padding: .7rem;
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 6px;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .55; cursor: progress; }
+    button.link {
+      background: none; color: var(--muted); font-weight: 400;
+      margin-top: .75rem; padding: .25rem;
+    }
+
+    .msg { margin-top: 1rem; padding: .7rem .8rem; border-radius: 6px; font-size: .9rem; display: none; }
+    .msg.error   { display: block; background: rgba(255,107,107,.12); border: 1px solid var(--danger); }
+    .msg.success { display: block; background: rgba(78,201,122,.12); border: 1px solid var(--ok); }
+    .msg.partial { display: block; background: rgba(255,180,84,.12); border: 1px solid var(--warn); }
+
+    .step { display: none; }
+    .step.active { display: block; }
+
+    /* Operator-provided banner fragments wear this class if they want it. */
+    .pw-banner {
+      padding: .6rem .8rem;
+      margin-bottom: 1rem;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      border-radius: 6px;
+      font-size: .85rem;
+    }
+    .pw-banner:empty { display: none; }
+
+    .who { margin: 0 0 .75rem; font-size: .9rem; color: var(--muted); }
+    .who b { color: var(--fg); }
+
+    .hint { margin-top: .6rem; font-size: .8rem; color: var(--muted); }
+  </style>
+</head>
+
+<body>
+  <main>
+    <div id="banner"></div>
+
+    <h1>Account</h1>
+    <p class="sub">Sign in to continue.</p>
+
+    <section id="step-user" class="step active">
+      <form id="form-user" autocomplete="on" novalidate>
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required autofocus />
+        <button type="submit">Continue</button>
+      </form>
+    </section>
+
+    <section id="step-pass" class="step">
+      <form id="form-pass" autocomplete="on" novalidate>
+        <p class="who">Username: <b id="who"></b></p>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password"
+               autocomplete="current-password" required />
+        <button type="submit">Sign in</button>
+        <button type="button" class="link" id="back">Use a different username</button>
+      </form>
+    </section>
+
+    <section id="step-change" class="step">
+      <form id="form-change" autocomplete="on" novalidate>
+        <div id="banner-authed"></div>
+        <p class="who">Signed in as <b id="who2"></b></p>
+        <label for="new_password">New password</label>
+        <input id="new_password" name="new_password" type="password"
+               autocomplete="new-password" required />
+        <label for="confirm">Confirm new password</label>
+        <input id="confirm" name="confirm" type="password"
+               autocomplete="new-password" required />
+        <button type="submit">Change password</button>
+      </form>
+    </section>
+
+    <div id="msg" class="msg" role="status" aria-live="polite"></div>
+  </main>
+
+  <script>
+    "use strict";
+
+    const $ = (id) => document.getElementById(id);
+    const steps = { user: $("step-user"), pass: $("step-pass"), change: $("step-change") };
+    const msg = $("msg");
+
+    let ticket = null;     // stage-1 result
+    let session = null;    // stage-2 result
+    let busy = false;
+
+    // Load the optional banner fragments. Fixed paths; absent ones show nothing.
+    function loadBanner(id, path) {
+      fetch(path)
+        .then((r) => (r.ok ? r.text() : ""))
+        .then((html) => { $(id).innerHTML = html; })
+        .catch(() => { });
+    }
+    loadBanner("banner", "/banner.html");
+
+    function show(step) {
+      for (const [k, el] of Object.entries(steps)) el.classList.toggle("active", k === step);
+    }
+
+    function say(kind, text) {
+      msg.className = "msg " + kind;
+      msg.textContent = text;
+    }
+
+    function clear() {
+      msg.className = "msg";
+      msg.textContent = "";
+    }
+
+    function setBusy(on) {
+      busy = on;
+      for (const b of document.querySelectorAll("button[type=submit]")) b.disabled = on;
+    }
+
+    async function post(url, payload) {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      let data = {};
+      try { data = await resp.json(); } catch (_) { /* non-JSON */ }
+      return { status: resp.status, data };
+    }
+
+    // ---- step 1: username. Deliberately cannot fail. -----------------------
+    $("form-user").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      clear();
+      const username = $("username").value.trim();
+      if (!username) { $("username").focus(); return; }
+
+      setBusy(true);
+      try {
+        const { data } = await post("/auth/user", { username });
+        if (!data.ticket) { say("error", data.error || "Could not continue."); return; }
+        ticket = data.ticket;
+        $("who").textContent = username;
+        $("who2").textContent = username;
+        $("password").value = "";
+        show("pass");
+        $("password").focus();
+      } catch (_) {
+        say("error", "Could not reach the server.");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    // ---- step 2: password. Authentication happens here. --------------------
+    $("form-pass").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      clear();
+      const password = $("password").value;
+      if (!password) { $("password").focus(); return; }
+
+      setBusy(true);
+      try {
+        const { status, data } = await post("/auth/pass", { ticket, password });
+        if (data.session) {
+          session = data.session;
+          $("password").value = "";
+          $("new_password").value = "";
+          $("confirm").value = "";
+          loadBanner("banner-authed", "/banner-authed.html");
+          show("change");
+          $("new_password").focus();
+          return;
+        }
+        // One message for every failure: unknown user and wrong password are
+        // deliberately the same.
+        say("error", data.error || "Invalid username or password.");
+        $("password").value = "";
+        $("password").focus();
+        if (data.ticket) {
+          // Server issued a fresh ticket so a typo can just be retyped.
+          // Keep the user on this form instead of sending them back.
+          ticket = data.ticket;
+        } else if (status === 401 && !data.session) {
+          // No replacement ticket: the flow must restart.
+          ticket = null;
+          show("user");
+        }
+      } catch (_) {
+        say("error", "Could not reach the server.");
+      } finally {
+        setBusy(false);
+      }
+    });
+
+    $("back").addEventListener("click", () => {
+      ticket = null;
+      clear();
+      $("password").value = "";
+      show("user");
+      $("username").focus();
+    });
+
+    // ---- step 3: change the password (authenticated) ----------------------
+    $("form-change").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (busy) return;
+      clear();
+      const newPassword = $("new_password").value;
+      const confirm = $("confirm").value;
+
+      if (newPassword !== confirm) {
+        say("error", "The new password and confirmation do not match.");
+        return;
+      }
+
+      setBusy(true);
+      try {
+        const { data } = await post("/api/change", { session, new_password: newPassword });
+        if (data.ok) {
+          say("success", data.message || "Your password has been changed.");
+          session = null;
+          $("new_password").value = "";
+          $("confirm").value = "";
+        } else if (data.partial) {
+          // One store changed, the other did not: the user must understand
+          // that their OLD password still works and they should retry.
+          say("partial", data.error || "Only one password store was updated.");
+        } else {
+          say("error", data.error || "Could not change the password.");
+        }
+      } catch (_) {
+        say("error", "Could not reach the server.");
+      } finally {
+        setBusy(false);
+      }
+    });
+  </script>
+</body>
+
+</html>

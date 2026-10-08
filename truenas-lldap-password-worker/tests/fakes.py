@@ -1,0 +1,121 @@
+"""Offline fakes for the two boundaries in core.py.
+
+These touch no network, no clock, no filesystem. They record every call into a
+SHARED ordered log so tests can assert the exact interleaved call sequence
+(the ordering contract from SPEC §6.1).
+
+FakeLdapClient
+    bind(username, password)
+    set_password(username, old, new)
+
+    Configurable failure modes:
+      - reject_new_password: set_password(...) raises ChangeError
+        (simulates a directory policy rejection).
+      - reject_verify_bind: the bind that happens AFTER set_password (the
+        verification bind with the new password) raises ChangeError.
+      - A plain wrong password (not matching current_password) always fails
+        bind — use this to simulate "wrong current password".
+
+    The current password is tracked so that:
+      - bind() with the right password succeeds, with a wrong one fails.
+      - after a successful set_password(), the new password is the one that
+        binds and the old one no longer does.
+
+FakeTrueNasClient
+    find_local_replica(username) -> row dict or None
+    set_password(username, new_password)
+
+    Configurable failure modes:
+      - fail_set_password: set_password raises ChangeError (or a generic
+        Exception, if set_password_exc is set).
+      - no local_replica: find_local_replica returns None.
+"""
+
+from __future__ import annotations
+
+from core import ChangeError
+
+
+class _CallLog:
+    """A shared, ordered list of boundary calls across both fakes."""
+
+    def __init__(self):
+        self.entries = []
+
+    def record(self, entry):
+        self.entries.append(entry)
+
+
+class FakeLdapClient:
+    """In-memory lldap boundary: records calls, tracks the live password."""
+
+    def __init__(self, *, current_password="oldpass", reject_new_password=False,
+                 reject_verify_bind=False, log=None):
+        self.current_password = current_password
+        self.reject_new_password = reject_new_password
+        self.reject_verify_bind = reject_verify_bind
+        self._set_password_done = False
+        self._log = log if log is not None else _CallLog()
+
+    @property
+    def calls(self):
+        """This fake's calls only (filtered from the shared log)."""
+        return [e for e in self._log.entries if e[0] in ("bind", "set_password")
+                and len(e) > 2]
+
+    # -- public boundary interface ----------------------------------------
+    def bind(self, username, password):
+        self._log.record(("bind", username, password))
+        # If set_password already ran and we're configured to reject the
+        # verification bind, fail it — simulates the new password not yet
+        # being visible / accepted.
+        if self._set_password_done and self.reject_verify_bind:
+            raise ChangeError("verification bind failed")
+        # Normal behaviour: only the live password binds.
+        if password != self.current_password:
+            raise ChangeError("invalid credentials")
+
+    def set_password(self, username, old_password, new_password):
+        self._log.record(("set_password", username, old_password, new_password))
+        self._set_password_done = True
+        if self.reject_new_password:
+            raise ChangeError(
+                "lldap rejected the new password (policy, or the current "
+                "password is wrong)"
+            )
+        # On success the live password flips: old stops working, new binds.
+        self.current_password = new_password
+
+
+class FakeTrueNasClient:
+    """In-memory TrueNAS boundary: records calls, tracks local replica."""
+
+    def __init__(self, *, local_replica=None, fail_set_password=False,
+                 set_password_exc=None, log=None):
+        # local_replica: a row dict (e.g. {"id": 81, "local": True, "smb": True})
+        # or None when no local replica exists.
+        self._local_replica = local_replica
+        self.fail_set_password = fail_set_password
+        self.set_password_exc = set_password_exc  # alternative exception type
+        self._log = log if log is not None else _CallLog()
+
+    @property
+    def calls(self):
+        return [e for e in self._log.entries
+                if e[0] in ("find_local_replica", "tn_set_password")]
+
+    # -- public boundary interface ----------------------------------------
+    def find_local_replica(self, username):
+        self._log.record(("find_local_replica", username))
+        return self._local_replica
+
+    def set_password(self, username, new_password):
+        self._log.record(("tn_set_password", username, new_password))
+        if self.fail_set_password:
+            if self.set_password_exc is not None:
+                raise self.set_password_exc("nas unreachable")
+            raise ChangeError(
+                "nothing was changed: the NAS password could not be set "
+                "(nas unreachable). Your current password still works; "
+                "please try again."
+            )

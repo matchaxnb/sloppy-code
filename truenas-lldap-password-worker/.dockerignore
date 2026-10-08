@@ -1,0 +1,49 @@
+# Keep the build context lean and never copy secrets / artifacts into the image.
+# NOTE: core.py is intentionally NOT ignored -- it must ship in the image.
+
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+build/
+dist/
+
+# Virtual envs (a dev venv may live alongside the sources)
+venv/
+.venv/
+env/
+
+# Docs, reports, specs -- not needed at runtime
+SPEC.md
+CONTRACT.md
+REPORT*.md
+DEPLOY.md
+README.md
+
+# Tests and fakes -- the image runs the service only
+test_*.py
+*_test.py
+tests/
+fakes.py
+
+# Secrets must never enter the build context
+*.key
+*.pem
+.env
+.env.*
+secrets/
+*.secret
+
+# Editor / OS noise
+.git/
+.gitignore
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

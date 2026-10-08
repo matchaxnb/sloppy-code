@@ -1,0 +1,60 @@
+# docker-compose for local dev / integration testing of the password worker.
+#
+# NOT the production deployment. The TrueNAS API key is mounted
+# as a 0600 file, not baked into the image.
+#
+# Two-address model (host-side publish vs in-container bind):
+#   PW_LISTEN = bind INSIDE the container      (default 0.0.0.0:8099)
+#   PW_BIND   = HOST-side publish address:port (default nas-host:8099)
+# nas-host cannot be bound inside a container (the interface does not
+# exist there), so server.py binds 0.0.0.0 inside and compose publishes ONLY
+# to the LAN address via PW_BIND. A bare 0.0.0.0 publish would expose the
+# service wherever the host has a public address -- that is exactly how the
+# lldap standby (standby-host) became internet-reachable. Never do that.
+#
+# Usage:
+#   docker compose build
+#   docker compose up        # publishes on PW_BIND (default nas-host:8099)
+#
+# To test the TrueNAS half for real, set PW_TN_KEY_FILE to a 0600 file path
+# (mounted read-only below) instead of passing the key as an env var.
+
+services:
+  password-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: exampleuser/truenas-lldap-password-management:0.1.0
+    container_name: password-worker
+    restart: unless-stopped
+    environment:
+      PW_LDAP_URI: ${PW_LDAP_URI:-ldap://nas-host:30326}
+      PW_LDAP_BASE: ${PW_LDAP_BASE:-dc=example,dc=lan}
+      PW_TN_WSS: ${PW_TN_WSS:-wss://nas-host/api/current}
+      # In-container bind. 0.0.0.0 is correct here -- the host-side exposure is
+      # controlled by PW_BIND in the `ports` mapping below.
+      PW_LISTEN: ${PW_LISTEN:-0.0.0.0:8099}
+      PW_MIN_LEN: ${PW_MIN_LEN:-8}
+      # PW_TN_KEY is intentionally NOT set here. Prefer mounting a 0600 file
+      # (below) via PW_TN_KEY_FILE. If you must use an env var, uncomment:
+      # PW_TN_KEY: ${PW_TN_KEY:-}
+      # Leave both unset to run the StubTrueNasPasswordClient (no SMB writes).
+    ports:
+      # HOST-side publish: pin to the LAN address (PW_BIND), never 0.0.0.0.
+      # The container port (8099) matches EXPOSE / PW_LISTEN.
+      - "${PW_BIND:-nas-host:8099}:8099"
+    volumes:
+      # Optional: mount the TrueNAS API key as a 0600 file. Create it with:
+      #   install -m 0600 /dev/null ./secrets/tn_api_key && echo -n 'YOUR-KEY' > ./secrets/tn_api_key
+      # then set PW_TN_KEY_FILE=/run/secrets/tn_api_key below.
+      - ./secrets/tn_api_key:/run/secrets/tn_api_key:ro
+    # The file mount above is optional; if it does not exist compose warns but
+    # starts. To make it required, add `required: true` (compose v2.24+).
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os,urllib.request; s=os.environ.get('PW_LISTEN','0.0.0.0:8099'); p=s.rsplit(':',1)[-1] if ':' in s else '8099'; urllib.request.urlopen('http://127.0.0.1:'+p+'/', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    # Run as the non-root user created in the Dockerfile.
+    user: "10001:10001"
