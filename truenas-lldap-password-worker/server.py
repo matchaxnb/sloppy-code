@@ -30,7 +30,7 @@ import authgate
 import core
 import messages
 from messages import ErrorKind
-from secret_string import SecretString
+from secret_string import SecretString, json_response
 
 __all__ = ["Handler", "WorkerServer", "main"]
 
@@ -150,7 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
 
     def _send_json(self, status: int, payload: dict):
-        body = json.dumps(payload).encode("utf-8")
+        body = json_response(payload)
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -444,13 +444,7 @@ class WorkerServer(ThreadingHTTPServer):
 
 def build_clients():
     """Build the ldap and TrueNAS clients from the environment."""
-    ldap_client = core.LdapClient(
-        os.environ.get("PW_LDAP_URI", DEFAULT_LDAP_URI),
-        os.environ.get("PW_LDAP_BASE", DEFAULT_LDAP_BASE),
-        dn_template=os.environ.get(
-            "PW_LDAP_DN_TEMPLATE", "uid={username},ou=people,{base_dn}"
-        ),
-    )
+    ldap_client = core.build_ldap_client()
     tn_client, _ = core.build_tn_client()
     return ldap_client, tn_client
 
@@ -464,7 +458,11 @@ def main():
 
     listen_host, listen_port = parse_listen(os.environ.get("PW_LISTEN", DEFAULT_LISTEN))
     bind_host, bind_port = parse_listen(os.environ.get("PW_BIND", DEFAULT_BIND))
-    ldap_client, tn_client = build_clients()
+    try:
+        ldap_client, tn_client = build_clients()
+    except core.ConfigError as e:
+        log.error("misconfigured: %s", e)
+        raise SystemExit(2) from e
 
     banners = BannerStore(
         Path(BANNER_DIR),

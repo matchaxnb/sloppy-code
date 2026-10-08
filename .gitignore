@@ -29,7 +29,6 @@ secrets/
 .idea/
 .vscode/
 
-# Review file
+# Code review tool
 /REVIEW.md
-/REVIEW-*.md
-/.old-reviews
+/.review-history/

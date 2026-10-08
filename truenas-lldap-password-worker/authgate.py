@@ -88,14 +88,14 @@ def is_trusted(addr: str | None) -> bool:
 
 
 def auth_delay() -> float:
-    """Random delay for the validation phases, applied in both stages."""
+    """A randomised delay for the validation phases, applied in both stages."""
     return random.uniform(DELAY_BASE, DELAY_BASE + DELAY_VARIANCE)
 
 
 @dataclass
 class FailState:
     count: int = 0
-    # Monotonic timestamps: the clock cannot jump, so these are floats.
+    # Seconds since a fixed origin (time.monotonic), so a float.
     banned_until: float = 0.0
     last_failure: float = 0.0
 

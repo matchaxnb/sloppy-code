@@ -33,10 +33,8 @@ except ImportError as e:
     print("run this on the NAS, or install truenas_api_client", file=sys.stderr)
     raise SystemExit(2) from e
 
-# Overridable so the same script works against whichever registry you can push
-# to. ghcr.io is the preferred home; set TN_IMAGE to use it.
 IMAGE = os.environ.get(
-    "TN_IMAGE", "exampleuser/truenas-lldap-password-management:0.1.0"
+    "TN_IMAGE", "matchalunatic/truenas-lldap-password-management:0.1.0"
 )
 # Where the worker reaches the middleware API. Defaults to the SAME host it is
 # published on: inside the container 127.0.0.1 is the container itself, so

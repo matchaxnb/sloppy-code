@@ -21,18 +21,22 @@ from ldap3.core.exceptions import LDAPBindError, LDAPException
 from ldap3.extend.standard.modifyPassword import ModifyPassword
 from truenas_api_client import Client
 
-from messages import ErrorKind
+from messages import ErrorKind, operator_text
 
 __all__ = [
     "ChangeError",
     "ChangeResult",
+    "ConfigError",
     "LdapClient",
     "TrueNasPasswordClient",
+    "build_ldap_client",
     "build_tn_client",
     "change_password",
 ]
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+DEFAULT_DN_TEMPLATE = "uid={username},ou=people,{base_dn}"
 
 
 class ChangeError(Exception):
@@ -41,6 +45,10 @@ class ChangeError(Exception):
     def __init__(self, message: str, kind: ErrorKind = ErrorKind.UNKNOWN):
         super().__init__(message)
         self.kind = kind
+
+
+class ConfigError(ChangeError):
+    """The service is misconfigured. Not caused by a request; fix the deployment."""
 
 
 @dataclass
@@ -52,6 +60,7 @@ class ChangeResult:
     truenas: bool = False
     truenas_applicable: bool = False
     partial: bool = False
+    reverted: bool = False
     message: str = ""
 
     @property
@@ -160,7 +169,7 @@ class LdapClient:
         base_dn: str,
         *,
         timeout: int = 8,
-        dn_template: str = "uid={username},ou=people,{base_dn}",
+        dn_template: str = DEFAULT_DN_TEMPLATE,
     ):
         self.uri = uri
         self.base_dn = base_dn
@@ -270,16 +279,39 @@ def change_password(
         result.lldap = False
         result.partial = result.truenas
         if result.truenas:
-            result.message = (
-                "Your SMB password was updated, but your directory password was "
-                "not. Your directory password is still your previous one."
-            )
+            # Attempt to put the NAS back, so the stores do not drift apart.
+            try:
+                tn_client.set_password(username, old_password)
+                result.truenas = False
+                result.partial = False
+                result.reverted = True
+            except Exception:
+                result.message = (
+                    "Your password was changed on the NAS but not in the "
+                    "directory. Your directory password is still your previous "
+                    "one; sign in with it and try again."
+                )
+                raise ChangeError(result.message, ErrorKind.PARTIAL) from None
         raise ChangeError(
-            result.message or str(e), ErrorKind.PARTIAL if result.truenas else e.kind
+            result.message or str(e), ErrorKind.PARTIAL if result.partial else e.kind
         ) from None
 
     ldap_client.bind(username, new_password)
     return result
+
+
+def build_ldap_client(env=None):
+    """Build the directory client from the environment, or raise ConfigError."""
+    env = env if env is not None else os.environ
+    uri = env.get("PW_LDAP_URI", "")
+    base = env.get("PW_LDAP_BASE", "")
+    if not uri:
+        raise ConfigError(operator_text("no_ldap_uri"))
+    if not base:
+        raise ConfigError(operator_text("no_ldap_base"))
+    return LdapClient(
+        uri, base, dn_template=env.get("PW_LDAP_DN_TEMPLATE", DEFAULT_DN_TEMPLATE)
+    )
 
 
 def build_tn_client(env=None):
@@ -292,13 +324,7 @@ def build_tn_client(env=None):
             key = fh.read().strip()
     wss = env.get("PW_TN_WSS", "")
     if not key:
-        raise ChangeError(
-            "no TrueNAS API key configured; set PW_TN_KEY or PW_TN_KEY_FILE",
-            ErrorKind.UNKNOWN,
-        )
+        raise ConfigError(operator_text("no_api_key"))
     if not wss:
-        raise ChangeError(
-            "PW_TN_WSS is not set; the TrueNAS API URL is required",
-            ErrorKind.UNKNOWN,
-        )
+        raise ConfigError(operator_text("no_wss_url"))
     return TrueNasPasswordClient(wss, key), True

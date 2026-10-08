@@ -2,19 +2,28 @@
 """User-facing strings, in one place.
 
 Everything a user can see lives here so it can be audited, translated, or
-replaced wholesale. Log messages are deliberately NOT here: they stay English
-and terse, and are read by operators.
+replaced wholesale. Operator-facing text (the messages `ConfigError` carries to
+the startup log) is also here, under `OPERATOR`, because it is read by a person
+too. Log messages are deliberately NOT here: they stay English and terse.
 
 `ErrorKind` is the vocabulary shared with core: core raises `ChangeError` with a
-kind, and this module decides what that kind says to a user. No message text is
-matched by substring anywhere.
+kind and this module decides what that kind says. No message text is matched by
+substring anywhere.
 """
 
 from __future__ import annotations
 
 import enum
 
-__all__ = ["ErrorKind", "ERRORS", "MESSAGES", "error_text", "text"]
+__all__ = [
+    "ErrorKind",
+    "ERRORS",
+    "MESSAGES",
+    "OPERATOR",
+    "error_text",
+    "operator_text",
+    "text",
+]
 
 
 class ErrorKind(enum.Enum):
@@ -41,8 +50,9 @@ ERRORS: dict[ErrorKind, str] = {
         "it reasonably long."
     ),
     ErrorKind.PARTIAL: (
-        "Your password was only partially changed. Your previous password still "
-        "works -- sign in with it and try again, choosing a different new password."
+        "Your password was changed on the NAS but not in the directory. Your "
+        "directory password is still your previous one; sign in with it and try "
+        "again."
     ),
     ErrorKind.NOT_AUTHENTICATED: "Your session has ended. Please sign in again.",
     ErrorKind.VALIDATION: (
@@ -56,7 +66,7 @@ ERRORS: dict[ErrorKind, str] = {
 # Everything else a user can see that is not an error.
 MESSAGES: dict[str, str] = {
     "changed": "Your password has been changed.",
-    "unavailable": ("The service is temporarily unavailable. Please try again later."),
+    "unavailable": "The service is temporarily unavailable. Please try again later.",
     "throttled": "Too many failed attempts. Try again in {seconds} seconds.",
     "session_expired": "Session expired; start again.",
     "not_authenticated": "Not authenticated; start again.",
@@ -67,6 +77,15 @@ MESSAGES: dict[str, str] = {
     "unexpected": "An unexpected error occurred.",
 }
 
+# Operator-facing explanations, logged at startup. Read by a person fixing a
+# deployment, so they are actionable rather than generic.
+OPERATOR: dict[str, str] = {
+    "no_api_key": "no TrueNAS API key configured; set PW_TN_KEY or PW_TN_KEY_FILE",
+    "no_wss_url": "PW_TN_WSS is not set; the TrueNAS API URL is required",
+    "no_ldap_uri": "PW_LDAP_URI is not set; the directory endpoint is required",
+    "no_ldap_base": "PW_LDAP_BASE is not set; the directory base DN is required",
+}
+
 
 def error_text(kind: ErrorKind) -> str:
     """The user-facing text for a failure kind."""
@@ -74,5 +93,10 @@ def error_text(kind: ErrorKind) -> str:
 
 
 def text(key: str, **fields: object) -> str:
-    """A non-error message, with named fields substituted."""
+    """A non-error user message, with named fields substituted."""
     return MESSAGES[key].format(**fields)
+
+
+def operator_text(key: str) -> str:
+    """A startup/config message for whoever is fixing the deployment."""
+    return OPERATOR[key]

@@ -19,6 +19,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import ChangeError, change_password  # noqa: E402
+from messages import ErrorKind  # noqa: E402
 from tests.fakes import FakeLdapClient, FakeTrueNasClient, _CallLog  # noqa: E402
 
 USER = "alice"
@@ -103,27 +104,41 @@ class TestTrueNasFailureLeavesLldapUnchanged(unittest.TestCase):
 
 
 class TestLldapRejectsNewAfterTrueNasSuccess(unittest.TestCase):
-    """SPEC §6.3: partial application reported honestly; old password works."""
+    """When lldap refuses after the NAS was written, the NAS is put back."""
 
     def test_raises_change_error(self):
         ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
         with self.assertRaises(ChangeError):
             change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
 
-    def test_message_mentions_split(self):
+    def test_nas_is_reverted_to_the_old_password(self):
+        ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
+        with self.assertRaises(ChangeError):
+            change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
+        # A second set_password back to OLD must have been attempted.
+        writes = [e for e in tn.calls if e[0] == "tn_set_password"]
+        self.assertEqual(writes[-1][2], OLD)
+
+    def test_reverted_change_is_not_reported_as_partial(self):
         ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
         with self.assertRaises(ChangeError) as ctx:
             change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
-        msg = str(ctx.exception).lower()
-        # Must name the SMB/directory split.
-        self.assertIn("smb", msg)
-        self.assertIn("directory", msg)
+        # Rollback succeeded, so the stores agree: not a partial application.
+        self.assertIsNot(ctx.exception.kind, ErrorKind.PARTIAL)
+
+    def test_still_partial_when_rollback_fails(self):
+        ldap, tn, _ = _make(
+            ldap_kw={"reject_new_password": True}, tn_kw={"fail_set_password_after": 1}
+        )
+        with self.assertRaises(ChangeError) as ctx:
+            change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
+        self.assertIs(ctx.exception.kind, ErrorKind.PARTIAL)
+        self.assertIn("directory", str(ctx.exception).lower())
 
     def test_old_password_still_works(self):
         ldap, tn, _ = _make(ldap_kw={"reject_new_password": True})
         with self.assertRaises(ChangeError):
             change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
-        # lldap password never flipped -> old binds.
         ldap.bind(USER, OLD)
 
     def test_truenas_was_changed(self):

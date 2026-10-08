@@ -1,34 +1,8 @@
-"""Offline fakes for the two boundaries in core.py.
+"""In-memory stand-ins for the two boundaries in core.py.
 
-These touch no network, no clock, no filesystem. They record every call into a
-SHARED ordered log so tests can assert the exact interleaved call sequence
-(the ordering contract from SPEC §6.1).
-
-FakeLdapClient
-    bind(username, password)
-    set_password(username, old, new)
-
-    Configurable failure modes:
-      - reject_new_password: set_password(...) raises ChangeError
-        (simulates a directory policy rejection).
-      - reject_verify_bind: the bind that happens AFTER set_password (the
-        verification bind with the new password) raises ChangeError.
-      - A plain wrong password (not matching current_password) always fails
-        bind — use this to simulate "wrong current password".
-
-    The current password is tracked so that:
-      - bind() with the right password succeeds, with a wrong one fails.
-      - after a successful set_password(), the new password is the one that
-        binds and the old one no longer does.
-
-FakeTrueNasClient
-    find_local_replica(username) -> row dict or None
-    set_password(username, new_password)
-
-    Configurable failure modes:
-      - fail_set_password: set_password raises ChangeError (or a generic
-        Exception, if set_password_exc is set).
-      - no local_replica: find_local_replica returns None.
+No network, no clock, no filesystem. Calls are recorded in one shared ordered
+log so a test can assert the exact interleaved sequence. FakeLdapClient tracks
+the live password, so bind() succeeds only with the current one.
 """
 
 from __future__ import annotations
@@ -105,6 +79,7 @@ class FakeTrueNasClient:
         local_replica=None,
         fail_set_password=False,
         set_password_exc=None,
+        fail_set_password_after=None,
         log=None,
     ):
         # local_replica: a row dict (e.g. {"id": 81, "local": True, "smb": True})
@@ -112,6 +87,10 @@ class FakeTrueNasClient:
         self._local_replica = local_replica
         self.fail_set_password = fail_set_password
         self.set_password_exc = set_password_exc  # alternative exception type
+        # Fail only from the Nth set_password onwards, so a test can let the
+        # first write succeed and the compensating write fail.
+        self.fail_set_password_after = fail_set_password_after
+        self._set_password_count = 0
         self._log = log if log is not None else _CallLog()
 
     @property
@@ -129,7 +108,12 @@ class FakeTrueNasClient:
 
     def set_password(self, username, new_password):
         self._log.record(("tn_set_password", username, new_password))
-        if self.fail_set_password:
+        self._set_password_count += 1
+        fail_now = self.fail_set_password or (
+            self.fail_set_password_after is not None
+            and self._set_password_count > self.fail_set_password_after
+        )
+        if fail_now:
             if self.set_password_exc is not None:
                 raise self.set_password_exc("nas unreachable")
             raise ChangeError(

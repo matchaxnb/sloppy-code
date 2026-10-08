@@ -33,7 +33,7 @@ other stale. This changes both, and says so honestly when only one succeeded.
 ## Quick deployment
 
 Needs: Python 3.11, an LDAP server, a TrueNAS host with the middleware API, and
-an API key. There is no stub mode: without a key the service refuses to start.
+an API key. Without one the service refuses to start.
 `truenas_api_client` is **not on PyPI** — the image builds it from
 `github.com/truenas/api_client` at a pinned tag (see `Dockerfile`).
 
