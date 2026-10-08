@@ -1,14 +1,17 @@
 # sloppy-code
 
-Code I wrote, or mostly wrote, and did **not** seriously review.
+Code written by an AI coding assistant under my direction, and **not** seriously
+reviewed by me or anyone else.
 
 The name is not a joke at my own expense for fun. It is a warning label. Nothing in
 this repo should be trusted because it is in this repo.
 
 ## What "sloppy" means here, concretely
 
-- **Not reviewed.** It may be correct, it may be subtly wrong. I have not read it
+- **Not reviewed.** I directed what it should do; I did not read the result
   carefully end to end, and neither has anyone else.
+- **AI-generated.** An assistant wrote the code, including the comments claiming
+  it was careful. Treat confident-sounding prose in here as unverified.
 - **Not maintained.** No promises, no support, no issue triage. It exists because it
   was useful to me once.
 - **Possibly wrong in ways that matter.** Some of it touches credentials, file

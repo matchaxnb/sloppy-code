@@ -1,6 +1,7 @@
 # truenas-lldap-password-worker
 
-> **Part of [`sloppy-code`](../README.md). Unreviewed. Read it before you run it.**
+> **Part of [`sloppy-code`](../README.md). Written by an AI assistant, unreviewed.
+> Read it before you run it.**
 
 Lets a user change their password **once** and have it written to **two** stores:
 an LDAP directory (RFC 3062 Password Modify, tested against
