@@ -1,3 +1,13 @@
+# human note
+
+this works for me, for my files, in my context.
+
+i run the VLM part against qwen3-VL-8b-instruct, with success.
+
+lets me have a clean library.
+
+# robot stuff
+
 # media-organizer
 
 Identify a visual-media tree under `$MEDIA_ROOT/<sources>` and lay it out under
