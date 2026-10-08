@@ -28,3 +28,8 @@ secrets/
 .DS_Store
 .idea/
 .vscode/
+
+# Review file
+/REVIEW.md
+/REVIEW-*.md
+/.old-reviews

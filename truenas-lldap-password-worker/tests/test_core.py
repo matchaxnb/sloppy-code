@@ -18,7 +18,7 @@ import unittest
 # Make core.py importable regardless of where unittest is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import ChangeError, ChangeResult, change_password  # noqa: E402
+from core import ChangeError, change_password  # noqa: E402
 from tests.fakes import FakeLdapClient, FakeTrueNasClient, _CallLog  # noqa: E402
 
 USER = "alice"
@@ -57,11 +57,11 @@ class TestOrdering(unittest.TestCase):
         change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
 
         expected = [
-            ("bind", USER, OLD),                       # 1. authenticate
-            ("find_local_replica", USER),              # 2a. locate replica
-            ("tn_set_password", USER, NEW),           # 2b. TrueNAS first
-            ("set_password", USER, OLD, NEW),          # 3. lldap last
-            ("bind", USER, NEW),                       # 4. verify
+            ("bind", USER, OLD),  # 1. authenticate
+            ("find_local_replica", USER),  # 2a. locate replica
+            ("tn_set_password", USER, NEW),  # 2b. TrueNAS first
+            ("set_password", USER, OLD, NEW),  # 3. lldap last
+            ("bind", USER, NEW),  # 4. verify
         ]
         self.assertEqual(log.entries, expected)
 
@@ -69,19 +69,16 @@ class TestOrdering(unittest.TestCase):
         """The NAS password is set before the directory password."""
         ldap, tn, log = _make()
         change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
-        tn_idx = next(i for i, e in enumerate(log.entries)
-                      if e[0] == "tn_set_password")
-        ldap_idx = next(i for i, e in enumerate(log.entries)
-                        if e[0] == "set_password")
+        tn_idx = next(i for i, e in enumerate(log.entries) if e[0] == "tn_set_password")
+        ldap_idx = next(i for i, e in enumerate(log.entries) if e[0] == "set_password")
         self.assertLess(tn_idx, ldap_idx)
 
     def test_lldap_changed_last_before_verify(self):
         """No store mutation happens after the lldap set_password except verify."""
         ldap, tn, log = _make()
         change_password(USER, OLD, NEW, ldap_client=ldap, tn_client=tn)
-        ldap_idx = next(i for i, e in enumerate(log.entries)
-                        if e[0] == "set_password")
-        after = log.entries[ldap_idx + 1:]
+        ldap_idx = next(i for i, e in enumerate(log.entries) if e[0] == "set_password")
+        after = log.entries[ldap_idx + 1 :]
         # The only thing after the lldap change is the verification bind.
         self.assertEqual(after, [("bind", USER, NEW)])
 
@@ -157,14 +154,22 @@ class TestValidation(unittest.TestCase):
     """All validation failures raise ChangeError and touch no store."""
 
     def _assert_no_set_password(self, log):
-        self.assertFalse(any(e[0] in ("set_password", "tn_set_password")
-                             for e in log.entries))
+        self.assertFalse(
+            any(e[0] in ("set_password", "tn_set_password") for e in log.entries)
+        )
 
     def test_malformed_username(self):
         ldap, tn, log = _make()
         # USERNAME_RE = ^[A-Za-z0-9][A-Za-z0-9._-]*$ — these are all invalid.
-        for bad in ["", "  ", "-dash", "has space", "user@host",
-                    ".dotstart", "user/name"]:
+        for bad in [
+            "",
+            "  ",
+            "-dash",
+            "has space",
+            "user@host",
+            ".dotstart",
+            "user/name",
+        ]:
             with self.assertRaises(ChangeError, msg=f"expected failure for {bad!r}"):
                 change_password(bad, OLD, NEW, ldap_client=ldap, tn_client=tn)
         self._assert_no_set_password(log)

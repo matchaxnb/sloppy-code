@@ -17,9 +17,11 @@ internally on 0.0.0.0 and publish ONLY on the LAN address (see the README).
 Usage:
     TN_KEY=<api key> python3 deploy_app.py [--port 30030] [--name pw-worker]
 """
+
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -27,11 +29,15 @@ import textwrap
 
 try:
     from truenas_api_client import Client
-except ImportError:
+except ImportError as e:
     print("run this on the NAS, or install truenas_api_client", file=sys.stderr)
-    raise SystemExit(2)
+    raise SystemExit(2) from e
 
-IMAGE = "exampleuser/truenas-lldap-password-management:0.1.0"
+# Overridable so the same script works against whichever registry you can push
+# to. ghcr.io is the preferred home; set TN_IMAGE to use it.
+IMAGE = os.environ.get(
+    "TN_IMAGE", "exampleuser/truenas-lldap-password-management:0.1.0"
+)
 # Where the worker reaches the middleware API. Defaults to the SAME host it is
 # published on: inside the container 127.0.0.1 is the container itself, so
 # loopback here silently fails to connect. Override only if the API lives
@@ -39,7 +45,7 @@ IMAGE = "exampleuser/truenas-lldap-password-management:0.1.0"
 WSS_OVERRIDE = os.environ.get("TN_WSS", "").strip()
 # LDAP endpoint for the directory the worker writes to. Deployment-specific, so
 # no host address is guessed; the port and base DN are arguments/overrides.
-LDAP_PORT = os.environ.get("TN_LDAP_PORT", "30326")
+LDAP_PORT = os.environ.get("TN_LDAP_PORT", "389")
 LDAP_BASE = os.environ.get("TN_LDAP_BASE", "dc=example,dc=lan")
 # Trusted subnets: exempt from rate limiting and the only peers whose
 # X-Forwarded-For is believed. Empty means "trust no subnet" (every client is
@@ -49,12 +55,12 @@ TRUSTED_SUBNETS = os.environ.get("TN_TRUSTED_SUBNETS", "").strip()
 # be bare text: the template supplies the leading spaces, and textwrap.dedent
 # then sees the line at the same indent as its neighbours. A whitespace-only
 # result is ignored by dedent.
-_TRUSTED_LINE = (f'PW_TRUSTED_SUBNETS: "{TRUSTED_SUBNETS}"'
-                 if TRUSTED_SUBNETS else "")
+_TRUSTED_LINE = f'PW_TRUSTED_SUBNETS: "{TRUSTED_SUBNETS}"' if TRUSTED_SUBNETS else ""
 
 
-def compose_yaml(app_name: str, port: int, host_ip: str, key_path: str,
-                 banner_dir: str) -> str:
+def compose_yaml(
+    app_name: str, port: int, host_ip: str, key_path: str, banner_dir: str
+) -> str:
     """The custom-app compose document.
 
     `PW_LISTEN` is the IN-CONTAINER bind (0.0.0.0 is correct and required --
@@ -111,12 +117,21 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--name", default="pw-worker")
     ap.add_argument("--port", type=int, default=30030)
-    ap.add_argument("--host-ip", default="127.0.0.1",
-                    help="host address to publish on; set this to your LAN address")
-    ap.add_argument("--key-file", default="/etc/pw-worker/pw.key",
-                    help="host path to the 0600 API key file")
-    ap.add_argument("--banner-dir", default="/mnt/pool/pwortal-data",
-                    help="host dataset holding the banner fragments (editable on the NAS)")
+    ap.add_argument(
+        "--host-ip",
+        default="127.0.0.1",
+        help="host address to publish on; set this to your LAN address",
+    )
+    ap.add_argument(
+        "--key-file",
+        default="/etc/pw-worker/pw.key",
+        help="host path to the 0600 API key file",
+    )
+    ap.add_argument(
+        "--banner-dir",
+        default="/mnt/pool/pwortal-data",
+        help="host dataset holding the banner fragments (editable on the NAS)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -125,8 +140,9 @@ def main() -> int:
         print("TN_KEY is required", file=sys.stderr)
         return 2
 
-    yaml_doc = compose_yaml(args.name, args.port, args.host_ip, args.key_file,
-                            args.banner_dir)
+    yaml_doc = compose_yaml(
+        args.name, args.port, args.host_ip, args.key_file, args.banner_dir
+    )
     payload = {
         "app_name": args.name,
         "custom_app": True,
@@ -135,13 +151,16 @@ def main() -> int:
 
     if args.dry_run:
         print("--- payload (dry run) ---")
-        print(json.dumps({**payload, "custom_compose_config_string": "<yaml>"}, indent=2))
+        print(
+            json.dumps({**payload, "custom_compose_config_string": "<yaml>"}, indent=2)
+        )
         print("--- compose ---")
         print(yaml_doc)
         return 0
 
-    client = Client(WSS_OVERRIDE or f"wss://{args.host_ip}/api/current",
-                    verify_ssl=False)
+    client = Client(
+        WSS_OVERRIDE or f"wss://{args.host_ip}/api/current", verify_ssl=False
+    )
     try:
         if not client.call("auth.login_with_api_key", key):
             print("API key rejected", file=sys.stderr)
@@ -157,8 +176,11 @@ def main() -> int:
         used = client.call("app.used_ports") or []
         taken = {int(p) for p in used if isinstance(p, (int, str)) and str(p).isdigit()}
         if args.port in taken:
-            print(f"port {args.port} is already used by another app "
-                  f"(in use: {sorted(taken)})", file=sys.stderr)
+            print(
+                f"port {args.port} is already used by another app "
+                f"(in use: {sorted(taken)})",
+                file=sys.stderr,
+            )
             return 1
 
         print(f"creating custom app {args.name!r} on {args.host_ip}:{args.port} ...")
@@ -171,13 +193,13 @@ def main() -> int:
             print(f"create job {job_id} finished")
         except Exception as e:
             print(f"warning: could not wait on job {job_id}: {e}", file=sys.stderr)
-            print("check it with: midclt call core.get_jobs '[[\"id\",\"=\",<id>]]'",
-                  file=sys.stderr)
+            print(
+                'check it with: midclt call core.get_jobs \'[["id","=",<id>]]\'',
+                file=sys.stderr,
+            )
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.close()
-        except Exception:
-            pass
     return 0
 
 

@@ -33,7 +33,8 @@ other stale. This changes both, and says so honestly when only one succeeded.
 ## Quick deployment
 
 Needs: Python 3.11, an LDAP server, a TrueNAS host with the middleware API, and
-an API key. `truenas_api_client` is **not on PyPI** — the image builds it from
+an API key. There is no stub mode: without a key the service refuses to start.
+`truenas_api_client` is **not on PyPI** — the image builds it from
 `github.com/truenas/api_client` at a pinned tag (see `Dockerfile`).
 
 **1. Create a least-privilege API key** on the NAS and store it read-only:
@@ -94,6 +95,7 @@ queryable — start it separately.
 |---|---|
 | `PW_BIND` | Host-side publish address. **A LAN address, never `0.0.0.0`.** |
 | `PW_LDAP_URI` / `PW_LDAP_BASE` | LDAP endpoint and base DN |
+| `PW_LDAP_DN_TEMPLATE` | DN for a user; `{username}` and `{base_dn}` are substituted. Change it if your directory does not use `ou=people`. |
 | `PW_TN_WSS` | Middleware URL. Must be reachable *from the container*: `127.0.0.1` there is the container itself. |
 | `PW_TN_KEY_FILE` / `PW_TN_KEY` | API key; prefer the file |
 | `PW_TRUSTED_SUBNETS` | **No default.** Comma-separated CIDRs exempt from rate limiting. Loopback always trusted. Unset means `X-Forwarded-For` is never believed and every client shares the proxy's address — the safe failure. |
@@ -101,7 +103,7 @@ queryable — start it separately.
 Others: `PW_LISTEN`, `PW_BANNER_DIR`, `PW_BANNER_FILE(_AUTHED)`, `PW_MIN_LEN`,
 `PW_FAIL_THRESHOLD`, `PW_BAN_BASE`/`PW_BAN_MAX`, `PW_FIRST_COOLDOWN`,
 `PW_DISTINCT_IPS_MAX`/`_WINDOW`/`_COOLDOWN`, `PW_MAX_PENDING`/`PW_MAX_SESSIONS`,
-`PW_DELAY_MIN`/`PW_DELAY_MAX`, `PW_SESSION_TTL`. Defaults are in `server.py` and
+`PW_DELAY_BASE`/`PW_DELAY_VARIANCE`, `PW_SESSION_TTL`. Defaults are in `server.py` and
 `authgate.py`.
 
 ## Running and testing

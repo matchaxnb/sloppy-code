@@ -14,6 +14,7 @@ Covers:
 Run:
     python3 -m unittest discover -s tests -v
 """
+
 from __future__ import annotations
 
 import os
@@ -34,7 +35,7 @@ class TrustedSubnetMixin:
     configured network.
     """
 
-    SUBNET = "198.18.0.0/15"      # a range that is not anyone's real LAN
+    SUBNET = "198.18.0.0/15"  # a range that is not anyone's real LAN
 
     def setUp(self):
         self._saved = authgate._TRUSTED_NETS
@@ -50,7 +51,7 @@ class TestTrustedSubnet(TrustedSubnetMixin, unittest.TestCase):
             self.assertTrue(is_trusted(addr), addr)
 
     def test_loopback_is_always_trusted_without_configuration(self):
-        authgate._TRUSTED_NETS = []      # nothing configured
+        authgate._TRUSTED_NETS = []  # nothing configured
         for addr in ("127.0.0.1", "127.0.0.5", "::1"):
             self.assertTrue(is_trusted(addr), addr)
 
@@ -69,8 +70,8 @@ class TestTrustedSubnet(TrustedSubnetMixin, unittest.TestCase):
 class TestClientIp(TrustedSubnetMixin, unittest.TestCase):
     def test_xff_used_when_peer_is_trusted(self):
         self.assertEqual(
-            Gate.client_ip("203.0.113.9, 198.51.100.4", "198.18.0.9"),
-            "198.51.100.4")  # rightmost
+            Gate.client_ip("203.0.113.9, 198.51.100.4", "198.18.0.9"), "198.51.100.4"
+        )  # rightmost
 
     def test_xff_ignored_when_nothing_is_configured(self):
         # With no trusted subnet every client is seen as the proxy itself.
@@ -111,7 +112,7 @@ class TestTrustedClientsAreExempt(unittest.TestCase):
     def test_trusted_ips_do_not_trip_the_breaker(self):
         g = Gate()
         for i in range(authgate.DISTINCT_IPS_MAX * 3):
-            self.assertEqual(g.note_ip("198.18.0.%d" % (i % 250 + 1)), 0)
+            self.assertEqual(g.note_ip(f"198.18.0.{i % 250 + 1}"), 0)
         self.assertEqual(g.denial_remaining(), 0)
         self.assertEqual(g._ip_seen, {})
 
@@ -125,6 +126,7 @@ class TestTrustedClientsAreExempt(unittest.TestCase):
         # The change path must not know about trust at all. If this fails,
         # someone has made trust an authorization decision.
         import pathlib
+
         src = pathlib.Path(__file__).resolve().parent.parent / "server.py"
         text = src.read_text()
         self.assertNotIn("is_trusted", text)
@@ -134,8 +136,9 @@ class TestTrustedClientsAreExempt(unittest.TestCase):
 class TestBanGrowth(unittest.TestCase):
     def test_first_failure_is_the_plain_cooldown(self):
         g = Gate()
-        self.assertEqual(g.record_failure("1.1.1.1"),
-                         authgate.FIRST_FAIL_COOLDOWN)
+        self.assertEqual(
+            g.record_failure("1.1.1.1"), authgate.FIRST_FAIL_COOLDOWN.total_seconds()
+        )
 
     def test_ban_doubles_then_caps(self):
         g = Gate()
@@ -146,8 +149,10 @@ class TestBanGrowth(unittest.TestCase):
         seen = []
         for _ in range(12):
             seen.append(g.record_failure(ip))
-        self.assertLessEqual(max(seen), authgate.BAN_MAX_SECONDS)
-        self.assertTrue(any(b > authgate.FIRST_FAIL_COOLDOWN for b in seen))
+        self.assertLessEqual(max(seen), authgate.BAN_MAX.total_seconds())
+        self.assertTrue(
+            any(b > authgate.FIRST_FAIL_COOLDOWN.total_seconds() for b in seen)
+        )
 
     def test_success_clears_the_record(self):
         g = Gate()
@@ -162,8 +167,7 @@ class TestCircuitBreaker(unittest.TestCase):
         g = Gate()
         n = authgate.DISTINCT_IPS_MAX
         for i in range(n):
-            self.assertEqual(g.note_ip("10.0.0.%d" % i), 0,
-                             "tripped too early at %d" % i)
+            self.assertEqual(g.note_ip(f"10.0.0.{i}"), 0, f"tripped too early at {i}")
         # the (n+1)th distinct address trips it
         self.assertGreater(g.note_ip("10.0.0.99"), 0)
 
@@ -175,16 +179,16 @@ class TestCircuitBreaker(unittest.TestCase):
     def test_old_observations_age_out_of_the_window(self):
         g = Gate()
         for i in range(authgate.DISTINCT_IPS_MAX):
-            g.note_ip("10.1.0.%d" % i)
+            g.note_ip(f"10.1.0.{i}")
         # age everything past the window
-        stale = authgate.DISTINCT_IPS_WINDOW + 1
+        stale = authgate.DISTINCT_IPS_WINDOW.total_seconds() + 1
         g._ip_seen = {k: t - stale for k, t in g._ip_seen.items()}
         self.assertEqual(g.note_ip("10.1.0.99"), 0)
 
     def test_denial_blocks_everyone_not_just_the_source(self):
         g = Gate()
         for i in range(authgate.DISTINCT_IPS_MAX + 1):
-            g.note_ip("10.2.0.%d" % i)
+            g.note_ip(f"10.2.0.{i}")
         self.assertGreater(g.denial_remaining(), 0)
         # an unrelated address is refused for the same duration
         self.assertGreater(g.note_ip("10.9.9.9"), 0)

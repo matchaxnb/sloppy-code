@@ -49,8 +49,14 @@ class _CallLog:
 class FakeLdapClient:
     """In-memory lldap boundary: records calls, tracks the live password."""
 
-    def __init__(self, *, current_password="oldpass", reject_new_password=False,
-                 reject_verify_bind=False, log=None):
+    def __init__(
+        self,
+        *,
+        current_password="oldpass",
+        reject_new_password=False,
+        reject_verify_bind=False,
+        log=None,
+    ):
         self.current_password = current_password
         self.reject_new_password = reject_new_password
         self.reject_verify_bind = reject_verify_bind
@@ -60,8 +66,11 @@ class FakeLdapClient:
     @property
     def calls(self):
         """This fake's calls only (filtered from the shared log)."""
-        return [e for e in self._log.entries if e[0] in ("bind", "set_password")
-                and len(e) > 2]
+        return [
+            e
+            for e in self._log.entries
+            if e[0] in ("bind", "set_password") and len(e) > 2
+        ]
 
     # -- public boundary interface ----------------------------------------
     def bind(self, username, password):
@@ -90,8 +99,14 @@ class FakeLdapClient:
 class FakeTrueNasClient:
     """In-memory TrueNAS boundary: records calls, tracks local replica."""
 
-    def __init__(self, *, local_replica=None, fail_set_password=False,
-                 set_password_exc=None, log=None):
+    def __init__(
+        self,
+        *,
+        local_replica=None,
+        fail_set_password=False,
+        set_password_exc=None,
+        log=None,
+    ):
         # local_replica: a row dict (e.g. {"id": 81, "local": True, "smb": True})
         # or None when no local replica exists.
         self._local_replica = local_replica
@@ -101,8 +116,11 @@ class FakeTrueNasClient:
 
     @property
     def calls(self):
-        return [e for e in self._log.entries
-                if e[0] in ("find_local_replica", "tn_set_password")]
+        return [
+            e
+            for e in self._log.entries
+            if e[0] in ("find_local_replica", "tn_set_password")
+        ]
 
     # -- public boundary interface ----------------------------------------
     def find_local_replica(self, username):
