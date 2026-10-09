@@ -70,7 +70,7 @@ CARTOON_CREDITS = ("Directed by, Produced by, Story, Animation, Music, Color by 
                    "All rights reserved, Presented by")
 
 SYS_CARTOON = (
-    "You are given a 2x2 grid of frames from the opening of ONE classic American "
+    "You are given a grid of frames from the opening of ONE classic American "
     "studio cartoon (c.1930-1960). Identify the CARTOON'S TITLE and the SERIES "
     "it was released under. Answer with exactly three fields separated by '||': "
     "TITLE || SERIES || CONFIDENCE.\n"
@@ -390,7 +390,7 @@ def pick_title(cards: list, pngs: list, td: str, system: str = SYS,
 
 
 DOMAIN_SYS = (
-    "You are given a 2x2 grid of frames from the opening of ONE audiovisual work. "
+    "You are given a grid of frames from the opening of ONE audiovisual work. "
     "Report its FORM and STRUCTURE, not its genre. Answer with exactly:\n"
     "FORM || STRUCTURE || STYLE\n"
     "FORM is one of: animated | live-action\n"
@@ -562,16 +562,17 @@ def title_for(path: str, window: int, frames: bool = True,
 
     `domain` (from `classify_domain`) selects a domain-specific title prompt; it
     is advisory — it only changes which cards are trusted, never gates the read.
-    If `grid` is given as "COLSxROWS" it controls the montage density (default 4x4);
-    a denser grid shows the whole opening card sequence at once, which is what
-    tells a series banner from the film's own title card.
+    If `grid` is given as "COLSxROWS" it controls the montage density (default 3x3);
+    a denser grid shows more of the opening card sequence, but too dense a canvas
+    is downscaled by the model until each tile's text is unreadable (4x4 loses
+    titles that 3x3 reads).
     """
     d = (domain or "").lower()
     system = SYS_CARTOON if ("cartoon" in d or "classic" in d) else SYS
     try:
-        gc, gr = (int(x) for x in (grid or "4x4").lower().split("x"))
+        gc, gr = (int(x) for x in (grid or "3x3").lower().split("x"))
     except ValueError:
-        gc, gr = 4, 4
+        gc, gr = 3, 3
     if frames:
         with tempfile.TemporaryDirectory() as td:
             # The title card lives in the first ~18 s; sampling beyond that pulls
