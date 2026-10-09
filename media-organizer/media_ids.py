@@ -528,6 +528,44 @@ def has_original_audio(features: dict, original_language: str | None) -> bool:
     return False
 
 
+def aspect_class(features: dict) -> str:
+    """The presentation shape that must be preserved as its own file.
+
+    A 4:3 release and a widescreen release of the same work are DIFFERENT
+    presentations, not two encodings of one: a widescreen version of a 4:3 show
+    is usually a pan-and-scan crop that loses picture (the Buffy case: the 16:9
+    "popcorn" set vs the open-matte 4:3 box). Resolution alone cannot see that,
+    so the family is the aspect class. Unknown dimensions collapse to "16:9"
+    (widescreen assumed) so a file with no probe never spawns a phantom family.
+    """
+    return "4:3" if _is_43(features) else "16:9"
+
+
+def audio_languages(features: dict) -> frozenset:
+    """The set of audio languages present, normalised to two-letter codes.
+
+    A dub-only release and a release carrying its original audio are different
+    presentations of the same work and must both be kept — this is the axis the
+    user keeps for languages, alongside aspect ratio.
+    """
+    out = set()
+    for a in features.get("audio_langs") or []:
+        a = (a or "").strip().lower()[:3]
+        if a and a not in ("un", "und"):
+            out.add(a[:2])
+    return frozenset(out)
+
+
+def presentation_key(features: dict) -> tuple:
+    """(aspect class, audio-language set) — the identity a kept file represents.
+
+    Two files with the same key are the SAME presentation and compete purely on
+    quality (resolution first): 4K beats 1080p, keep the 4K. Two files with
+    different keys are both kept.
+    """
+    return (aspect_class(features), audio_languages(features))
+
+
 # ---------------------------------------------------------------- routing
 def _dedup_tokens(text: str) -> str:
     """Collapse repeated whitespace-separated tokens: '2160p UHD UHD' -> '2160p UHD'."""

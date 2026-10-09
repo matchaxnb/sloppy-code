@@ -623,25 +623,64 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None, tmdb=No
     ops = []
     decision = None
     chosen = None
+    keepers = []
     if videos:
         for p in videos:
             feats.setdefault(p, {})
             feats[p]["tag"] = source_tag(feats[p], p)
         orig = eff["original_language"]
         ok = [p for p in videos if M.has_original_audio(feats[p], orig)]
-        pool = ok or videos
-        chosen = max(pool, key=lambda p: M.quality_score(feats[p], p, orig, kind))
+        # NOT `ok or videos`: filtering to original-audio first would discard a
+        # dub-only release entirely. Instead every version is grouped by
+        # presentation and the score (whose first axis is original-audio) picks
+        # within a family, so a dub-only release survives as its own language
+        # family while an original-audio encode wins its own family.
+        pool = videos
+
+        def _score(p):
+            return M.quality_score(feats[p], p, orig, kind)
+
+        # Keep one file PER PRESENTATION, not one file per group. A presentation
+        # is (aspect class, audio-language set): a 4:3 open-matte and a 16:9
+        # pan-and-scan of the same show are different works to the viewer, and so
+        # are a dub-only and an original-audio release — each must survive. Within
+        # one presentation the versions compete purely on quality, where
+        # resolution leads, so a 4K beats a 1080p and only the 4K is kept.
+        #
+        # Grouping is by COMPATIBILITY, not exact equality: a file whose audio
+        # languages could not be probed (empty set) must not be split off from an
+        # otherwise identical file — that would mint a phantom family and keep a
+        # redundant copy. Same aspect + (equal languages OR either side unknown)
+        # means one presentation.
+        families = []                      # list of (aspect, langs, [paths])
+        for p in pool:
+            asp = M.aspect_class(feats[p])
+            lng = M.audio_languages(feats[p])
+            for fam in families:
+                if fam[0] != asp:
+                    continue
+                if not fam[1] or not lng or fam[1] == lng:
+                    fam[2].append(p)
+                    if not fam[1]:
+                        fam[1] = lng        # adopt a known language set
+                    break
+            else:
+                families.append([asp, lng, [p]])
+        keepers = [max(fam[2], key=_score) for fam in families]
+        chosen = max(keepers, key=_score)          # the "primary" for decision/messages
+        dropped = [p for p in videos if p not in keepers]
         decision = {"group": f"{eff['title']}|S{season}|E{episode}|{kind}",
                     "versions": len(videos), "kept": chosen,
-                    "dropped": [p for p in videos if p != chosen], "orig_audio_ok": bool(ok)}
-        # record every rejected version: the ranking goes into the store's
-        # `alternative` table, NOT written beside the file (a stray .txt is not
-        # library content; it can be rendered on demand)
-        ranked = sorted(videos, key=lambda p: M.quality_score(feats[p], p, orig, kind), reverse=True)
+                    "kept_all": keepers, "presentations": len(families),
+                    "dropped": dropped, "orig_audio_ok": bool(ok)}
+        # record every rejected version (one per presentation family, plus any
+        # inter-family loser that still lost on quality within its own family):
+        # the ranking goes into the store's `alternative` table, NOT written
+        # beside the file (a stray .txt is not library content).
         eff["_alternatives"] = [
-            {"src": p, "score": M.quality_score(feats[p], p, orig, kind),
-             "size": _size(p), "reason": "lower-ranked version"}
-            for p in ranked if p != chosen
+            {"src": p, "score": _score(p), "size": _size(p),
+             "reason": "lower-ranked version"}
+            for p in sorted(dropped, key=_score, reverse=True)
         ]
 
     is_anime = eff["original_language"] == "ja"
@@ -667,14 +706,39 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None, tmdb=No
                 feat["episode_title"] = ep_name
         except Exception:
             pass
-    if chosen is not None:
-        r = M.route(chosen, eff, feat, videos, from_filename=False,
-                    season=season, episode=episode)
+    # Emit one op per kept presentation. With a single family this is exactly the
+    # old behaviour. When a group carries two, the names must not collide (Jellyfin
+    # mints a __dup otherwise), so every presentation after the first takes its
+    # family label as an edition tag: "Title (Year) [16:9]" / "... [4:3]" and, when
+    # the aspect class is shared but the audio differs, the language instead.
+    fam_labels = {}
+    if len(keepers) > 1:
+        aspects = [M.aspect_class(feats[p]) for p in keepers]
+        for p in keepers:
+            fk = M.presentation_key(feats[p])
+            if aspects.count(M.aspect_class(feats[p])) > 1:
+                langs = sorted(fk[1])
+                fam_labels[p] = "/".join(langs).upper() if langs else M.aspect_class(feats[p])
+            else:
+                fam_labels[p] = M.aspect_class(feats[p])
+    alts = eff.get("_alternatives") or []
+    for p in keepers:
+        # Per-file feature dict: the quality tag must describe THIS file, not the
+        # group's primary — otherwise the 16:9 encode is labelled with the DVD's
+        # tag ([DVD]) and Jellyfin sees two identical tags.
+        f = {"tag": feats[p]["tag"] if p in feats else ""}
+        if feat.get("episode_title"):
+            f["episode_title"] = feat["episode_title"]
+        label = fam_labels.get(p)
+        r = M.route(p, eff, f, videos, from_filename=False, season=season, episode=episode)
+        if label:
+            # apply the family label as an edition so names differ across families
+            base, ext = os.path.splitext(r["name"])
+            r = dict(r); r["name"] = f"{base} [{label}]{ext}"
         # Alternatives are NOT written beside the file: the rejection ranking is
         # provenance, not library content, and a stray .txt confuses Jellyfin.
         # It is kept on the op so the store records it, and can be rendered later.
-        alts = eff.get("_alternatives") or []
-        ops.append({"src": chosen, "dest_dir": r["dest_dir"], "name": r["name"],
+        ops.append({"src": p, "dest_dir": r["dest_dir"], "name": r["name"],
                     "kind": r["kind"], "meta": eff, "alternatives": alts})
 
     for p in subs:
