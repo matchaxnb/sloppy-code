@@ -60,7 +60,10 @@ EP_UNDERSCORE_RE = re.compile(r"(?<=\d)_(\d{1,3})(?:v(\d+))?_(?!\d)|(?<=[a-z])_(
 EP_CONCAT_RE = re.compile(r"(?i)(?:^|[._\s-])s(\d{2})(\d{2})(?!\d)")
 # An episode after a single dash, not dashes on both sides: "Victory - 09v2".
 # The trailing lookahead rejects a resolution ("- 1080p"), which is not an episode.
-EP_DASH_ONE_RE = re.compile(r"(?<!\d)[-–—][\s._-]*(\d{1,3})(?:v(\d+))?(?![\dp])")
+EP_DASH_ONE_RE = re.compile(r"(?<!\d)[-–—][\s._-]*(\d{1,3})(?:v(\d+))?(?![\dp])(?!\.\d)")
+# ^ the final lookahead rejects a decimal, so the "1" in an audio token
+#   ("DTS-HD-1.0", "DD-5.1") is not read as episode 1 — a false positive that
+#   mislabelled whole films as S01E01 and filed them as series episodes.
 YEAR_RE = re.compile(r"(?:^|[\s._\[(\-])((?:19|20)\d{2})(?:[\s._\])\)\-]|$)")
 PAREN_YEAR = re.compile(r"[\(\[]((?:19|20)\d{2})[\)\]]")
 
@@ -451,21 +454,57 @@ def decade(year: int | None) -> str:
     return f"{(year // 10) * 10}s"
 
 
-def media_dir(title: str, year: int | None, author: str | None, kind: str = "movie") -> str:
-    """Decade/Author/Title, or Decade/Title for a series.
+def feature_stem(title: str, year: int | None, director: str | None) -> str:
+    """`{Title} ({Year}) ({Director})` — the mandated feature file stem.
 
-    A film benefits from the author grouping — director, or studio for a
-    collective — because that is how a film shelf is browsed. A series does not:
-    the studio is unevenly recorded and adds a level for no navigational gain, so
-    series are flat under the decade.
+    Missing parts are omitted rather than filled with a placeholder: Jellyfin
+    reads the parentheticals positionally, so a bogus "(Unknown)" year is worse
+    than none.
     """
     year = _int_year(year)
-    y = f" ({year})" if year else ""
-    name = sanitize(f"{title}{y}")
+    s = sanitize(title) if title else "Unknown"
+    if year:
+        s += f" ({year})"
+    if director:
+        s += f" ({sanitize(director)})"
+    return s
+
+
+def show_dir(title: str, first: int | None, last: int | None) -> str:
+    """`{Show} ({FirstYear}-{LastYear})` — the mandated series folder.
+
+    Collapses to a single year when the run is one year (or the end is unknown,
+    as for an in-progress show).
+    """
+    first, last = _int_year(first), _int_year(last)
+    s = sanitize(title) if title else "Unknown"
+    if first and last and last != first:
+        s += f" ({first}-{last})"
+    elif first:
+        s += f" ({first})"
+    return s
+
+
+def episode_stem(season, episode, ep_title: str | None) -> str:
+    """`S{NN}E{NN} - {EpisodeTitle}` — the mandated episode file stem."""
+    s = f"S{int(season):02d}E{int(episode):02d}"
+    if ep_title:
+        s += f" - {sanitize(ep_title)}"
+    return s
+
+
+def media_dir(title: str, year: int | None, author: str | None, kind: str = "movie",
+              last_year: int | None = None, season=None) -> str:
+    """The directory a work sits in, under its category.
+
+    Jellyfin has no use for the decade/author nesting this used to produce: it
+    wants `category/{show}/` for a series and nothing deeper for a film, with all
+    the distinguishing information in the file NAME. So a film returns "" (its
+    category directory is the whole path) and a series returns its show folder.
+    """
     if kind == "tv":
-        return os.path.join(decade(year), name)
-    author = author or "Unknown"
-    return os.path.join(decade(year), sanitize(author), name)
+        return show_dir(title, year, last_year)
+    return ""
 
 
 def subtitle_keep(lang: str | None, anime: bool) -> bool:
@@ -558,37 +597,40 @@ def route(path: str, meta: dict, features: dict, videos_in_dir: list[str],
     is_bonus = p["is_extra"] or any(part.lower() in EXTRA_DIRS for part in path.split(os.sep)[:-1])
     title = sanitize(meta.get("title") or p["stem"])
     year = _int_year(meta.get("year") if not from_filename else (meta.get("year") or p["year"]))
-    author = meta.get("author")
+    author = meta.get("author")                 # director, for a film
+    last_year = _int_year(meta.get("last_year"))
+    tag = _dedup_tokens(features.get("tag") or "")
+    def _with_tag(n):
+        return n + (f" [{tag}]" if tag else "")
     if is_bonus:
         return {"kind": "bonus",
-                "dest_dir": os.path.join(CINEMA_BASE, BONUS_ROOT, sanitize(f"{title}{f' ({year})' if year else ''}")),
+                "dest_dir": os.path.join(CINEMA_BASE, BONUS_ROOT, feature_stem(title, year, author)),
                 "name": sanitize(os.path.splitext(os.path.basename(path))[0]) + ext}
     if is_episode:
-        # a series is flat under the decade: no author level, and the season is
-        # its own directory so episodes land together
-        d = os.path.join(base_prefix, media_dir(title, year, author, "tv"),
-                         f"Season {season:02d}")
+        # Jellyfin wants the season as its own directory and the episode number
+        # AND title in the file name; the show folder carries the year span.
+        d = os.path.join(base_prefix, media_dir(title, year, author, "tv", last_year=last_year))
+        ep_title = features.get("episode_title")
         if ext in SUB_EXT:
             lang = features.get("language")
-            base = f"{title} S{season:02d}E{episode:02d}"
+            base = episode_stem(season, episode, ep_title)
             if lang:
                 base += f".{lang}"
             return {"kind": "subtitle", "dest_dir": d, "name": sanitize(base) + ext}
-        n = f"{title} S{season:02d}E{episode:02d}"
+        n = episode_stem(season, episode, ep_title)
         if p["version"]:
             n += f"v{p['version']}"
-        tag = _dedup_tokens(features.get("tag") or "")
-        if tag:
-            n += f" [{tag}]"
-        return {"kind": "episode", "dest_dir": d, "name": sanitize(n) + (ext or ".mkv")}
+        return {"kind": "episode", "dest_dir": d, "name": sanitize(_with_tag(n)) + (ext or ".mkv")}
     if ext in VIDEO_EXT:
-        tag = _dedup_tokens(features.get("tag") or "")
-        n = f"{title}{f' ({year})' if year else ''}{f' [{tag}]' if tag else ''}"
-        return {"kind": "movie", "dest_dir": os.path.join(base_prefix, media_dir(title, year, author)), "name": sanitize(n) + ext}
-    # sidecar subtitle
+        # no per-title directory: the film's whole identity is in the name
+        return {"kind": "movie", "dest_dir": base_prefix,
+                "name": sanitize(_with_tag(feature_stem(title, year, author))) + ext}
+    # sidecar subtitle sits beside the film, same stem
     lang = features.get("language")
-    stem = f"{title}{f' ({year})' if year else ''}.{lang}" if lang else os.path.splitext(os.path.basename(path))[0]
-    return {"kind": "subtitle", "dest_dir": os.path.join(base_prefix, media_dir(title, year, author)),
+    stem = feature_stem(title, year, author)
+    if lang:
+        stem += f".{lang}"
+    return {"kind": "subtitle", "dest_dir": base_prefix,
             "name": sanitize(stem) + ext, "keep": subtitle_keep(lang, p["anime"])}
 
 
@@ -716,7 +758,8 @@ class RequestQueue:
 
 class TMDB:
     def __init__(self, token: str | None = None, api_key: str | None = None,
-                 rate: float | None = None, workers: int | None = None, store=None):
+                 rate: float | None = None, workers: int | None = None, store=None,
+                 anidb=None):
         self.token = token or os.environ.get("TMDB_TOKEN")
         self.key = api_key or os.environ.get("TMDB_API_KEY")
         if not self.token and not self.key:
@@ -727,6 +770,9 @@ class TMDB:
             burst=float(os.environ.get("TMDB_BURST", "10")),
             workers=int(workers if workers is not None else os.environ.get("TMDB_WORKERS", "4")))
         self.store = store
+        # Optional OFFLINE anime index (see anidb.py): used only as a fallback
+        # when TMDB fails or matches weakly, and it makes no network calls.
+        self.anidb = anidb
         self._cache: dict = {}
 
     def close(self):
@@ -772,6 +818,30 @@ class TMDB:
                     return cached
 
         out = self._identify_uncached(title, year, kind)
+        # AniDB fallback, anime only. Trying a query against the (anime-only)
+        # dump and finding nothing means "not anime", which is a free check; a
+        # hit means the work IS anime and we get the romaji/AID that TMDB's
+        # search often misses (English "Attack on Titan" -> "Shingeki no Kyojin").
+        # Only used when TMDB failed or matched weakly, so TMDB stays primary.
+        weak = out is None or (out.get("_match") or 0) < 0.60
+        if weak and self.anidb is not None:
+            hit = self.anidb.identify(title)
+            if hit:
+                aid, canonical = hit
+                if out is None:
+                    # no TMDB id at all: at least a stable identity + canonical
+                    # anime title, so the file is named and grouped correctly.
+                    # The AID is stored as a NEGATIVE synthetic id so the record
+                    # round-trips through the lookup/media cache like any other
+                    # (id 0/None would be written as a miss and lost next run).
+                    # Consumers must not send a negative id to a provider.
+                    out = {"id": -aid, "title": canonical, "year": None, "author": None,
+                           "original_language": "ja", "genres": ["Animation"], "genre_ids": [16],
+                           "kind": kind, "_anidb_aid": aid, "_anidb_title": canonical,
+                           "_match": 0.75}
+                else:
+                    out["_anidb_aid"] = aid
+                    out["_anidb_title"] = canonical
         if self.store:
             self.store.put_lookup(qkey, kind, out["id"] if out else None)
         self._cache[key] = out
@@ -843,13 +913,35 @@ class TMDB:
             self.store.put_media(out)
         return out
 
-    @staticmethod
-    def _cand_year(cand, kind):
+    def _cand_year(self, cand, kind):
         date = cand.get("first_air_date") if kind == "tv" else cand.get("release_date")
         try:
             return int((date or "")[:4]) or None
         except ValueError:
             return None
+
+    def episode_title(self, tv_id: int, season: int, episode: int):
+        """(episode name, air year) for one instalment, cached in the store.
+
+        Jellyfin's episode naming wants the episode TITLE, which the series-level
+        identification does not carry — it is a separate endpoint. A NEGATIVE
+        result is cached too (empty name): a season with no episode names, or a
+        special that 404s, must not be re-requested on every run — no provider
+        should be asked the same question twice.
+        """
+        if self.store:
+            hit = self.store.get_episode(tv_id, season, episode)
+            if hit is not None:
+                return hit
+        try:
+            d = self._get(f"/tv/{tv_id}/season/{season}/episode/{episode}")
+        except Exception:
+            return (None, None)          # transient failure: do not cache as a miss
+        name = (d or {}).get("name")
+        air = ((d or {}).get("air_date") or "")[:4] or None
+        if self.store:
+            self.store.put_episode(tv_id, season, episode, name or "", air)
+        return (name, air)
 
     @staticmethod
     def _alt_titles(detail, kind) -> list:
@@ -872,6 +964,7 @@ class TMDB:
             creatives = [c.get("name") for c in d.get("created_by") or []]
             studios = [c.get("name") for c in d.get("production_companies") or []]
             return {"id": d["id"], "title": d.get("name"), "year": (d.get("first_air_date") or "")[:4] or None,
+                    "last_year": (d.get("last_air_date") or "")[:4] or None,
                     "original_language": d.get("original_language"), "genres": genres, "genre_ids": genre_ids,
                     "author": (studios or creatives or [None])[0], "creatives": creatives, "studios": studios}
         crew = (d.get("credits") or {}).get("crew") or []

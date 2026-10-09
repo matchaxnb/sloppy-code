@@ -16,7 +16,7 @@ Tables
 from __future__ import annotations
 import json, os, queue, re, sqlite3, threading, time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def query_key(title: str, year, kind: str) -> str:
@@ -67,6 +67,24 @@ CREATE TABLE IF NOT EXISTS placement (
     media_id  TEXT,
     ts        REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS episode (
+    tmdb_id   INTEGER NOT NULL,
+    season    INTEGER NOT NULL,
+    episode   INTEGER NOT NULL,
+    title     TEXT,
+    air_year  TEXT,
+    fetched_at REAL NOT NULL,
+    PRIMARY KEY (tmdb_id, season, episode)
+);
+CREATE TABLE IF NOT EXISTS alternative (
+    kept_src  TEXT NOT NULL,
+    src       TEXT NOT NULL,
+    score     REAL,
+    size      INTEGER,
+    reason    TEXT,
+    ts        REAL NOT NULL,
+    PRIMARY KEY (kept_src, src)
+);
 """
 
 # upsert sql per table, keyed by op name
@@ -86,6 +104,12 @@ SQL = {
                   "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(src) DO UPDATE SET "
                   "src_size=excluded.src_size, dest=excluded.dest, kind=excluded.kind, "
                   "title=excluded.title, category=excluded.category, media_id=excluded.media_id, ts=excluded.ts"),
+    "episode": ("INSERT INTO episode(tmdb_id,season,episode,title,air_year,fetched_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(tmdb_id,season,episode) DO UPDATE SET "
+                "title=excluded.title, air_year=excluded.air_year, fetched_at=excluded.fetched_at"),
+    "alternative": ("INSERT INTO alternative(kept_src,src,score,size,reason,ts) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(kept_src,src) DO UPDATE SET "
+                    "score=excluded.score, size=excluded.size, reason=excluded.reason, ts=excluded.ts"),
 }
 
 
@@ -127,7 +151,14 @@ class Store:
         if row is None:
             self.db.execute("INSERT INTO meta(k,v) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
         elif int(row["v"]) != SCHEMA_VERSION:
-            raise RuntimeError(f"store schema {row['v']} != code {SCHEMA_VERSION}; recreate the db")
+            # Changes so far are additive (CREATE TABLE IF NOT EXISTS runs on
+            # every open, so any new table already exists by now). An OLDER
+            # stored version is therefore upgraded in place, not recreated — the
+            # lookup/media cache is the expensive part and must survive. A NEWER
+            # version means the code is older than the data; refuse that.
+            if int(row["v"]) > SCHEMA_VERSION:
+                raise RuntimeError(f"store schema {row['v']} > code {SCHEMA_VERSION}; upgrade the code")
+            self.db.execute("UPDATE meta SET v=? WHERE k='schema_version'", (str(SCHEMA_VERSION),))
 
     # ---------------- writer thread ----------------
     def _writer_loop(self):
@@ -199,7 +230,23 @@ class Store:
         self._enqueue("placement", (src, src_size, dest, kind, title, category,
                                     str(media_id) if media_id else None, time.time()))
 
+    def put_episode(self, tmdb_id: int, season: int, episode: int, title, air_year=None):
+        self._enqueue("episode", (tmdb_id, season, episode, title, air_year, time.time()))
+
+    def put_alternative(self, kept_src: str, src: str, score=None, size=None, reason=None):
+        self._enqueue("alternative", (kept_src, src, score, size, reason, time.time()))
+
     # ---------------- reads ----------------
+    def get_alternatives(self, kept_src: str) -> list:
+        return [dict(r) for r in self.db.execute(
+            "SELECT src, score, size, reason FROM alternative WHERE kept_src=? ORDER BY score DESC",
+            (kept_src,))]
+
+    def get_episode(self, tmdb_id: int, season: int, episode: int):
+        r = self.db.execute("SELECT title, air_year FROM episode WHERE tmdb_id=? AND season=? AND episode=?",
+                            (tmdb_id, season, episode)).fetchone()
+        return (r["title"], r["air_year"]) if r else None
+
     def get_lookup(self, qkey: str):
         """None = never looked up; -1 = looked up, no match; else the tmdb id."""
         r = self.db.execute("SELECT tmdb_id, miss FROM lookup WHERE qkey=?", (qkey,)).fetchone()

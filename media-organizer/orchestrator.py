@@ -32,6 +32,12 @@ SEASON_RE = re.compile(r"^(?i:season|s)[ ._-]*(\d{1,2})$") if False else None
 import re
 SEASON_RE = re.compile(r"^(?i:(?:season|saison|s)[ ._-]*)(\d{1,2})$")
 COUR_RE = re.compile(r"^(?i:(?:cour|part|tome|t)[ ._-]*)(\d{1,2})$")
+
+# Bonuses are detected unreliably (a short, an interview and a making-of are the
+# same shape to the heuristics) and Jellyfin files them badly, so they are left
+# OUT of the staged library until that is sorted. The ops are still computed —
+# they can be inspected — they are simply not applied.
+STAGE_BONUSES = False
 TV_RE = M.TV_RE
 # structural folders carry no title identity -> always skipped in the ancestor cascade
 STRUCTURAL_RE = re.compile(
@@ -508,7 +514,7 @@ def plan_disc(items, eff, kind, season, episode, feats, place_feature=True):
     return ops, decision
 
 
-def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None):
+def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None, tmdb=None):
     """items: list of (path, kind, relparts). feats: {video_path: features}.
     Chooses one best video, routes subs. Pure given feats."""
     # Disc segments are planned separately and never compete with encoded files.
@@ -519,7 +525,7 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None):
         ops, decision = plan_disc(disc_items, eff, kind, season, episode, feats,
                                   place_feature=not lib_videos)
         if lib_items:
-            o2, d2 = plan_group(lib_items, eff, meta, kind, season, episode, feats, ovr=ovr)
+            o2, d2 = plan_group(lib_items, eff, meta, kind, season, episode, feats, ovr=ovr, tmdb=tmdb)
             ops += o2
             decision = d2 or decision
         return ops, decision
@@ -553,8 +559,9 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None):
         decision = {"group": f"{eff['title']}|S{season}|E{episode}|{kind}",
                     "versions": len(videos), "kept": chosen,
                     "dropped": [p for p in videos if p != chosen], "orig_audio_ok": bool(ok)}
-        # record every rejected version so an .alternatives.txt can be written
-        # beside the kept file, ranked, with its source path and score
+        # record every rejected version: the ranking goes into the store's
+        # `alternative` table, NOT written beside the file (a stray .txt is not
+        # library content; it can be rendered on demand)
         ranked = sorted(videos, key=lambda p: M.quality_score(feats[p], p, orig, kind), reverse=True)
         eff["_alternatives"] = [
             {"src": p, "score": M.quality_score(feats[p], p, orig, kind),
@@ -574,30 +581,33 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None):
         if forced_cat:
             eff["_category"] = forced_cat
             eff["_forced_category"] = True
+    # Jellyfin's episode name needs the episode TITLE, which lives at a separate
+    # endpoint from the series identification. Resolved once per group and used
+    # by the video AND its sidecar subtitles, so their stems agree.
+    feat = {"tag": feats[chosen]["tag"] if chosen else ""}
+    if kind == "tv" and isinstance(episode, int) and meta and meta.get("id") and tmdb is not None:
+        try:
+            ep_name, _ep_year = tmdb.episode_title(int(meta["id"]), season or 1, episode)
+            if ep_name:
+                feat["episode_title"] = ep_name
+        except Exception:
+            pass
     if chosen is not None:
-        r = M.route(chosen, eff, {"tag": feats[chosen]["tag"]}, videos, from_filename=False,
+        r = M.route(chosen, eff, feat, videos, from_filename=False,
                     season=season, episode=episode)
-        ops.append({"src": chosen, "dest_dir": r["dest_dir"], "name": r["name"], "kind": r["kind"]})
+        # Alternatives are NOT written beside the file: the rejection ranking is
+        # provenance, not library content, and a stray .txt confuses Jellyfin.
+        # It is kept on the op so the store records it, and can be rendered later.
         alts = eff.get("_alternatives") or []
-        if alts:
-            stem = os.path.splitext(r["name"])[0]
-            lines = [f"Kept:      {r['name']}",
-                     f"Source:    {chosen}",
-                     f"Score:     {M.quality_score(feats[chosen], chosen, eff['original_language'], kind)}",
-                     "",
-                     f"Rejected alternatives ({len(alts)}), best first:", ""]
-            for a in alts:
-                lines.append(f"  score {a['score']}  {a['size']:>13,} B  {a['src']}")
-            ops.append({"kind": "marker", "dest_dir": r["dest_dir"],
-                        "name": f"{stem}.alternatives.txt", "src": chosen,
-                        "text": "\n".join(lines) + "\n"})
+        ops.append({"src": chosen, "dest_dir": r["dest_dir"], "name": r["name"],
+                    "kind": r["kind"], "meta": eff, "alternatives": alts})
 
     for p in subs:
         lang = subtitle_lang(p)
         if not M.subtitle_keep(lang, is_anime):
             continue
-        r = M.route(p, eff, {"language": lang}, videos, from_filename=False,
-                    season=season, episode=episode)
+        r = M.route(p, eff, {"language": lang, "episode_title": feat.get("episode_title")},
+                    videos, from_filename=False, season=season, episode=episode)
         ops.append({"src": p, "dest_dir": r["dest_dir"], "name": r["name"], "kind": "subtitle"})
 
     return ops, decision
@@ -972,7 +982,7 @@ def build_plan(roots, tmdb=None, verbose=True, store=None, probeworkers=3, max_g
     for g in groups.values():
         feats = {p: probes[p] for p, k, _r in g.items if k == "video" and p in probes}
         o, d = plan_group(g.items, g.eff, g.meta, g.kind,
-                          g.instalment.season, g.instalment.episode, feats, ovr=ovr)
+                          g.instalment.season, g.instalment.episode, feats, ovr=ovr, tmdb=tmdb)
         ops.extend(o)
         if d:
             decisions.append(d)
@@ -1016,9 +1026,10 @@ def stream_apply(roots, dest_root, tmdb=None, store=None, probeworkers=3,
     def do_group(g, feats):
         try:
             ops, dec = plan_group(g.items, g.eff, g.meta, g.kind,
-                                  g.instalment.season, g.instalment.episode, feats, ovr=ovr)
+                                  g.instalment.season, g.instalment.episode, feats, ovr=ovr, tmdb=tmdb)
             res = apply_plan(ops, dest_root, roots=roots, dry=dry, store=store,
-                             budget=budget, shared_dests=shared, rename=rename)
+                             budget=budget, shared_dests=shared, rename=rename,
+                             skip_kinds=() if STAGE_BONUSES else ("bonus",))
             return ops, dec, res
         finally:
             feats.clear()          # release probe results with the group
@@ -1063,10 +1074,10 @@ def stream_apply(roots, dest_root, tmdb=None, store=None, probeworkers=3,
                                     for x in r) else "  [budget stop]"
                 print(f"  [{done}/{len(order)}] {d['group'][:44]:44} -> {os.path.basename(d['kept'])}{tag}")
     # bonuses last (need identity only, no probe); only if budget remains
-    if bonuses and not budget.exhausted():
+    if bonuses and STAGE_BONUSES and not budget.exhausted():
         apply_plan(bonuses, dest_root, roots=roots, dry=dry, store=store,
                    budget=budget, shared_dests=shared, rename=rename)
-    elif bonuses:
+    elif bonuses and STAGE_BONUSES:
         stopped = True
     if verbose:
         state = f"STOPPED early: clone budget {budget.done}/{budget.limit} reached" \
@@ -1239,13 +1250,19 @@ def delete_tree_paced(root: str, verbose: bool = True, budget=None) -> int:
 
 
 def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
-               budget=None, shared_dests=None):
+               budget=None, shared_dests=None, skip_kinds=()):
     """Apply a plan. `budget` is a CloneBudget capping successful reflinks.
 
     The stop is a deliberate, clean halt between clones: skipped ops do not
     count, and no clone is ever interrupted mid-write. Re-running resumes,
     because placements are persisted and already-placed ops are skipped.
+
+    `skip_kinds` drops whole classes of op at the one place every emitter feeds
+    into — used to keep bonuses out of the staged library while their detection
+    is unreliable.
     """
+    if skip_kinds:
+        ops = [o for o in ops if o.get("kind") not in skip_kinds]
     results = []
     # Destinations claimed by more than one source (an old collapse) cannot be
     # reused by rename. The counts come from the caller because the streaming
@@ -1400,9 +1417,15 @@ def _record(store, op, dst):
     except OSError:
         size = 0
     meta = op.get("meta") or {}
+    mid = meta.get("id")
+    # a negative id is the synthetic AniDB-only marker, not a provider id
     store.put_placement(op["src"], size, dst, kind=op.get("kind"),
                         title=meta.get("title"), category=meta.get("_category"),
-                        media_id=meta.get("id"))
+                        media_id=mid if (mid and mid > 0) else None)
+    # rejected versions are provenance, stored not staged; render on demand
+    for a in op.get("alternatives") or []:
+        store.put_alternative(op["src"], a.get("src"), score=a.get("score"),
+                              size=a.get("size"), reason=a.get("reason"))
 
 
 # ------------------------------------------------------------------ main
@@ -1416,6 +1439,8 @@ def main(argv=None):
     ap.add_argument("--store", default=None,
                     help="sqlite state path (default: $MEDIA_STATE_DB)")
     ap.add_argument("--no-tmdb", action="store_true")
+    ap.add_argument("--no-anidb", action="store_true",
+                    help="skip the offline AniDB title index (no effect on TMDB)")
     ap.add_argument("--rename", action="store_true",
                     help="move already-placed copies to a newly-computed destination")
     ap.add_argument("--stream", action="store_true",
@@ -1473,7 +1498,15 @@ def main(argv=None):
         try:
             from store import Store
             store = Store(args.store)
-            tmdb = M.TMDB(store=store)
+            # Offline AniDB title index (daily dump, no per-title requests).
+            anidb = None
+            if store is not None:
+                try:
+                    import anidb as _anidb
+                    anidb = None if args.no_anidb else _anidb.AniDB()
+                except Exception:
+                    anidb = None
+            tmdb = M.TMDB(store=store, anidb=anidb)
         except Exception as e:
             print(f"  ! TMDB disabled: {e}", file=sys.stderr)
 
@@ -1505,7 +1538,8 @@ def main(argv=None):
         print(f"wrote {args.json}")
     if args.apply:
         res = apply_plan(ops, args.dest, roots=roots, dry=False, store=store,
-                         rename=args.rename, budget=CloneBudget(args.max_clones))
+                         rename=args.rename, budget=CloneBudget(args.max_clones),
+                         skip_kinds=() if STAGE_BONUSES else ("bonus",))
         # A status is a failure only when it neither placed nor legitimately
         # skipped: 'renamed' (moved an existing clone) and the 'skipped (...)'s
         # (already placed / plan collision / dest occupied) are not faults, and
