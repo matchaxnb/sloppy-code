@@ -18,6 +18,10 @@ except ImportError:  # single-file use
 
 VIDEO_EXT = {".mkv", ".mp4", ".m4v", ".avi", ".mov", ".ts", ".m2ts", ".wmv", ".mpg", ".mpeg", ".flv", ".webm"}
 SUB_EXT   = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".sup"}
+# Audio is never staged: .flac/.mp3 beside a film are leaked soundtrack/bonus
+# tracks, and the mime fallback would otherwise classify them as video.
+AUDIO_EXT = {".flac", ".mp3", ".aac", ".m4a", ".ogg", ".opus", ".wav", ".wma",
+             ".ac3", ".dts", ".mka", ".ape", ".alac", ".m3u", ".m3u8"}
 AUX_EXT   = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".txt", ".cue"}
 SAMPLE_EXT = {".nfo"}  # .nfo is aux, but can be "sample.nfo"
 
@@ -77,6 +81,46 @@ def norm(path: str) -> str:
 
 
 _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+# Identity of the current match-scoring rule. Written onto every cached media
+# record; a cached record that lacks it — or carries an older value — was scored
+# by a weaker rule and is re-verified once against the current one. Bump this
+# whenever the scoring changes, so stale/incorrect identities heal themselves.
+# "loc1" added localization-aware scoring (see TMDB._identify_uncached).
+_SCORING_RULE = "loc1"
+
+# A single quality/source token, as it appears after separator-splitting.
+_NOISE_TOKEN_RE = re.compile(
+    r"(?i)^(?:ntsc|pal|dvdrip|dvd|bluray|blu-ray|bdrip|brrip|web-?dl|webrip|hdtv|"
+    r"remux|x264|x265|h\.?264|h\.?265|hevc|avc|aac|ac3|eac3|flac|ddp?[\d.]*|dd[\d.]*|"
+    r"multi|dual|vostfr|truefrench|internal|repack|proper|hi10p?|\d{3,4}p|\d{3,4}x\d{3,4})$")
+_TITLE_TOKEN_SPLIT_RE = re.compile(r"[\s._]+")
+
+
+def _file_episode_title(text: str) -> str | None:
+    """The episode title written in a file name, if any.
+
+    Handles "Show - 1x01 - Title" and "Show S01E01 - Title" (scene dot forms
+    included). The quality/source tail always FOLLOWS the title, so the title is
+    everything up to the first quality token; a tail-only remainder (e.g.
+    "...S01E01.1080p.WEB-DL") yields None, so a nameless file is not mis-named
+    with a codec tag.
+    """
+    m = re.search(r"(?i)(?:\bS\d{1,2}[\s._-]*E\d{1,3}\b|\b\d{1,2}x\d{2,3}\b)(?P<rest>.*)$", text)
+    if not m:
+        return None
+    rest = re.sub(r"(?i)\.(?:mkv|mp4|avi|m4v|mov|ts|wmv|mpg|mpeg)$", "", m.group("rest"))
+    kept = []
+    for tok in _TITLE_TOKEN_SPLIT_RE.split(rest):
+        tok = tok.strip("[]{}")
+        if not tok:
+            continue
+        # A release group glued to the codec ("x264-GRP") must cut too, so the
+        # token is tested whole and up to its first dash.
+        if _NOISE_TOKEN_RE.match(tok) or _NOISE_TOKEN_RE.match(tok.split("-", 1)[0]):
+            break
+        kept.append(tok)
+    return " ".join(kept).strip(" -_.") or None
 
 
 def sanitize(name: str) -> str:
@@ -141,6 +185,13 @@ def parse_name(path: str) -> dict:
                     if ver:
                         out["version"] = int(ver)
                     break
+
+    # The episode TITLE is often written in the file name ("Show - 1x01 - Title",
+    # "Show S01E01 - Title"). It is a free, exactly-correct fallback for the
+    # provider lookup used for naming; discarding it left episodes named with
+    # just their number whenever the provider had no name for that instalment.
+    if out["episode"] is not None:
+        out["episode_title_file"] = _file_episode_title(stripped)
 
     ym = None
     pm = PAREN_YEAR.search(stripped)
@@ -527,17 +578,37 @@ def is_junk_path(hint_path: str) -> bool:
     return any(x.lower() in ("junk", "junk2", "unsorted", "todo") for x in (hint_path or "").split(os.sep))
 
 
+def _path_segments(hint_path: str) -> list:
+    """Folder name segments of a hint path, lowercased."""
+    return [p for p in (hint_path or "").replace("\\", "/").split("/") if p]
+
+
+def _has_segment(hint_path: str, *words) -> bool:
+    """True when one of `words` is a whole PATH SEGMENT or a token in one.
+
+    A substring test over the whole path is wrong: the release group
+    "x264-SHORTBREHD" made every South Park episode a "short film", because the
+    path contains "short". Matching a segment (or a token within one, split on
+    separators) keys on a real folder like "Shorts/" or a token like "anime".
+    """
+    for seg in _path_segments(hint_path):
+        toks = re.split(r"[^a-z0-9]+", seg)
+        for w in words:
+            if w in toks:
+                return True
+    return False
+
+
 def category(kind: str, eff: dict, meta: dict | None, duration_ms, hint_path: str = "",
              n_videos: int = 1) -> str:
     """Map a resolved title to one of the on-disk Cinema categories."""
-    low = (hint_path or "").lower()
     if is_junk_path(hint_path):
         return JUNK_CATEGORY
-    if "short" in low:
+    if _has_segment(hint_path, "short", "shorts"):
         return "ShortFilms"
-    if "anime" in low:
+    if _has_segment(hint_path, "anime"):
         return "AnimeSeries" if kind == "tv" else "AnimeFilms"
-    if "experimental" in low:
+    if _has_segment(hint_path, "experimental"):
         return "Experimental"
     genres = set((meta or {}).get("genres") or [])
     gids = set((meta or {}).get("genre_ids") or [])
@@ -610,7 +681,10 @@ def route(path: str, meta: dict, features: dict, videos_in_dir: list[str],
         # Jellyfin wants the season as its own directory and the episode number
         # AND title in the file name; the show folder carries the year span.
         d = os.path.join(base_prefix, media_dir(title, year, author, "tv", last_year=last_year))
-        ep_title = features.get("episode_title")
+        # Provider episode name first; the file name's own episode title is the
+        # fallback when the provider has none (a movie-collection match, an
+        # unmapped season, a 404). Either way the number alone is never used.
+        ep_title = features.get("episode_title") or p.get("episode_title_file")
         if ext in SUB_EXT:
             lang = features.get("language")
             base = episode_stem(season, episode, ep_title)
@@ -813,7 +887,11 @@ class TMDB:
                 return None
             if hit:
                 cached = self.store.get_media(kind, hit)
-                if cached is not None:
+                # Only trust a cached identity scored by the CURRENT rule. One
+                # written by an older (weaker) rule is re-verified once; the
+                # re-scored record carries the marker, so the cost is one API
+                # round per stale entry, once, not per run.
+                if cached is not None and cached.get("_rule") == _SCORING_RULE:
                     self._cache[key] = cached
                     return cached
 
@@ -838,7 +916,7 @@ class TMDB:
                     out = {"id": -aid, "title": canonical, "year": None, "author": None,
                            "original_language": "ja", "genres": ["Animation"], "genre_ids": [16],
                            "kind": kind, "_anidb_aid": aid, "_anidb_title": canonical,
-                           "_match": 0.75}
+                           "_match": 0.75, "_rule": _SCORING_RULE}
                 else:
                     out["_anidb_aid"] = aid
                     out["_anidb_title"] = canonical
@@ -889,17 +967,29 @@ class TMDB:
         ranked.sort(key=lambda t: -t[0])
 
         best = None
-        for score, yr, cand in ranked[:3]:
+        # Score every candidate against ALL its localized titles, not just the
+        # one the search happened to return. The search endpoint answers in one
+        # language (English), so a query written in another language is compared
+        # across languages and the wrong work wins: "Buffy contre les vampires"
+        # (the French name of show 95) is a token superset of the English name of
+        # the Season-8 spinoff, so the spinoff scored higher. Pulling the full
+        # translations set makes the query match the correct localized name
+        # exactly, whatever language it is in. Ranking order is also unreliable
+        # once the query is non-English, so the top handful is scored, not the
+        # first — #3 is where a correct match can hide (see the Buffy case: #2).
+        for score, yr, cand in ranked[:5]:
             detail = self._get(f"/{'tv' if kind == 'tv' else 'movie'}/{cand['id']}",
-                               append_to_response="credits,images,alternative_titles")
-            names = [detail.get("name") or detail.get("title") or ""]
-            names += self._alt_titles(detail, kind)
+                               append_to_response="credits,images,alternative_titles,translations")
+            names = self._all_names(detail, kind)
             total = title_similarity(title, names)
             if best is None or total > best[0]:
                 shaped = self._shape(detail, kind)
                 shaped["kind"] = kind
                 shaped["_match"] = round(total, 3)
+                shaped["_rule"] = _SCORING_RULE
                 best = (total, shaped)
+            if best[0] >= 0.98:
+                break                            # exact match; no need to look further
         if best is None:
             return None
         out = best[1]
@@ -942,6 +1032,20 @@ class TMDB:
         if self.store:
             self.store.put_episode(tv_id, season, episode, name or "", air)
         return (name, air)
+
+    @staticmethod
+    def _all_names(detail, kind) -> list:
+        """Every name TMDB reports: primary, all translations, alternates.
+
+        `detail` must carry `translations` and `alternative_titles`.
+        """
+        names = [detail.get("name") or detail.get("title") or ""]
+        for tr in ((detail.get("translations") or {}).get("translations") or []):
+            one = (tr.get("data") or {}).get("name")
+            if one:
+                names.append(one)
+        names += TMDB._alt_titles(detail, kind)
+        return names
 
     @staticmethod
     def _alt_titles(detail, kind) -> list:

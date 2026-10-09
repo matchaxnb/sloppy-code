@@ -45,17 +45,61 @@ STRUCTURAL_RE = re.compile(
     r"|integrale|intégrale|integral|collection|scans|raw|bonus|extras?|featurettes?|"
     r"special features|subs|subtitles|menus?|ncop|nced|samples?|bdmv|stream|auxdata|"
     r"bdjo|jar|playlist|clipinf|certificate)$")
+# A season/part container that carries a QUALIFIER after the number ("Saison 8 -
+# Animée", "Saison 1 à 4", "Season 03 - NTSC DVD"). STRUCTURAL_RE only accepts a
+# bare "Season NN"; without this a range folder ("Saison 1 à 4") is read as a
+# title ("à 4" -> a 2014 sitcom) and its files are filed under the wrong show.
+STRUCTURAL_PREFIX_RE = re.compile(
+    r"^(?i:(?:season|saison)s?|disc|disk|cd|dvd|part|cour|tome|vol|volume)"
+    r"[ ._-]*\d{1,2}(?:[\s._-]|$)")
+
+# A folder that carries the SHOW and the SEASON together ("BABYLON 5 - SEASON 03
+# - NTSC DVD...", "Buffy The Vampire Slayer S03 1080p..."). Such a folder is a
+# season pack, not a title: treating it as one gave every season its own show
+# ("Babylon 5 S03"), so a single series fragmented into one entry per season.
+_SEASON_IN_FOLDER_RE = re.compile(
+    r"(?i)^(?P<show>.+?)[\s._-]+(?:season|saison|s)[\s._-]*(?P<num>\d{1,2})(?:[\s._-]|$)")
+
+
+def season_folder(folder: str) -> tuple[str | None, int | None]:
+    """(show title, season) when the folder embeds a season, else (None, None).
+
+    Guards against eating a real title: the show part must be non-empty, and the
+    number must be a plausible season (1-40). "Season 03" alone is handled by
+    SEASON_RE as a pure season folder, so this only fires on the combined form.
+    """
+    m = _SEASON_IN_FOLDER_RE.match(folder.strip())
+    if not m:
+        return None, None
+    show = m.group("show").strip(" .-_")
+    try:
+        num = int(m.group("num"))
+    except (TypeError, ValueError):
+        return None, None
+    if not show or not (1 <= num <= 40):
+        return None, None
+    # A dotted scene name ("Buffy.the.Vampire.Slayer.s04.1999") keeps dots in the
+    # show part; normalise separators so the query is a title, not a filename.
+    show = re.sub(r"[._]+", " ", show).strip()
+    return show, num
 
 
 def is_structural(folder: str) -> bool:
-    return bool(STRUCTURAL_RE.match(folder.strip()))
+    f = folder.strip()
+    return bool(STRUCTURAL_RE.match(f) or STRUCTURAL_PREFIX_RE.match(f))
 
 # folders that are containers/categories, never titles -> never send to TMDB
 NON_TITLE = {"extras", "extra", "bonus", "bonuses", "featurettes", "special features",
              "samples", "sample", "shorts", "junk", "anime", "animearepack", "repack",
              "films", "cleanfilms", "movies", "series", "cleanseries",
              "filmscollec", "seriescollec", "subs", "subtitles", "menu", "menus",
-             "ncop", "nced", "__macosx"}
+             "ncop", "nced", "__macosx",
+             # generic inner containers that are not titles: a bare "Episodes"
+             # folder is otherwise sent to TMDB and resolves to the sitcom
+             # "Episodes" (2011), hijacking the real show from an outer folder.
+             "episode", "episodes", "ep", "eps", "videos", "video", "media",
+             "cd1", "cd2", "cd3", "cd4", "dvd1", "dvd2", "dvd3", "dvd4",
+             "disc1", "disc2", "disc3", "disc4"}
 
 
 def is_title_folder(folder: str) -> bool:
@@ -119,6 +163,11 @@ def classify(path: str) -> str:
     # get placed as if they were content. The real content is the .VOB.
     if ext in (".ifo", ".bup"):
         return "other"
+    # Audio is NEVER library content: a .flac/.mp3 beside a film is a leaked
+    # bonus track, and the mime fallback below would call it video. Blacklist by
+    # extension before the fallback, which exists for container video only.
+    if ext in M.AUDIO_EXT:
+        return "other"
     if ext in M.VIDEO_EXT:
         return "video"
     if ext in M.SUB_EXT:
@@ -129,8 +178,8 @@ def classify(path: str) -> str:
     mt = mime_type(path)
     if mt.startswith("video/") or mt in ("application/x-matroska", "application/vnd.rn-realmedia"):
         return "video"
-    if mt.startswith("audio/") or mt in ("application/ogg",):
-        return "video"
+    # NB: audio is deliberately NOT admitted here. A file whose real type is
+    # audio and whose name we do not recognise is not library content.
     if mt in ("application/x-subrip", "text/x-ssa", "text/x-ass", "application/x-ass"):
         return "subtitle"
     return "other"
@@ -263,9 +312,15 @@ def source_tag(feat: dict, path: str) -> str:
     bits = []
     if p["resolution"]:
         bits.append(_RES_LABEL.get(p["resolution"], p["resolution"]))
-    src = (M.parse_with_guessit(path).get("source") or "")
+    # guessit returns a LIST when a field is ambiguous ("TC.WEB-DL" -> both
+    # 'Telecine' and 'Web'). str(list) leaked a Python repr into the tag
+    # ("[1080p ['Telecine', 'Web']]"), so normalise to a joined string.
+    src = M.parse_with_guessit(path).get("source") or ""
+    if isinstance(src, (list, tuple)):
+        src = " ".join(str(x) for x in src if x)
+    src = str(src).replace("Ultra HD Blu-ray", "UHD").replace("Blu-ray", "BluRay")
     if src:
-        bits.append(str(src).replace("Ultra HD Blu-ray", "UHD").replace("Blu-ray", "BluRay"))
+        bits.append(src)
     if feat.get("hdr"):
         bits.append("HDR")
     return " ".join(bits).strip()
@@ -290,12 +345,19 @@ def resolve_identity(path, relparts, tmdb, cache, kind, root):
     guess = M.parse_with_guessit(path)
 
     season = None
+    season_show = None            # a combined "<Show> S03 ..." folder's show name
     for comp in reversed(relparts[:-1]):
         m = SEASON_RE.match(comp)
         if m:
             season = int(m.group(1)); break
         if comp.strip().lower() in ("specials", "special", "sp"):
             season = 0; break
+        show, num = season_folder(comp)
+        if show:
+            # a season PACK folder: take the season AND the show name it carries,
+            # so the series resolves to one show rather than one per season
+            season, season_show = num, show
+            break
     # The parsed episode is already authoritative — parse_name covers S01E01,
     # 1x02, "_Ep10v2_" and "- 13 -" forms. Gating it on TV_RE here discarded the
     # episode for every non-SxxExx naming, which merged a whole series into one
@@ -304,9 +366,16 @@ def resolve_identity(path, relparts, tmdb, cache, kind, root):
     if season is None and par["season"] is not None and episode is not None:
         season = par["season"]
 
-    # ancestor title folders: nearest first, prefer one carrying a year
-    dirs = [d for d in reversed(relparts[:-1]) if is_title_folder(d) and not is_structural(d)]
+    # ancestor title folders: nearest first, prefer one carrying a year.
+    # A combined season-pack folder ("Buffy The Vampire Slayer S03 1080p...") is
+    # NOT a title: it supplies the season (above) and its embedded SHOW NAME. If
+    # it were left in, each season would resolve to its own show.
+    dirs = [d for d in reversed(relparts[:-1])
+            if is_title_folder(d) and not is_structural(d) and season_folder(d)[0] is None]
     dirs.sort(key=lambda d: 0 if folder_title(d)[1] else 1)
+    if season_show:
+        # the season pack named the show; look it up ahead of the outer folders
+        dirs.insert(0, season_show)
     for d in dirs:
         t, y = folder_title(d)
         key = (kind, t.lower(), y)
@@ -906,10 +975,20 @@ def collect_units(roots, tmdb, cache, verbose=True, max_groups=None, ovr=None):
                 # shared token run IS the series title, so use it — that is what
                 # puts all 26 episodes in one group.
                 fam = siblings.series_family(folder_eps)
-                if fam:
+                # The family is a LOWER bound on the title, derived from file
+                # names alone; it must not displace a real identification. When
+                # resolve_identity found a provider id, that name is
+                # canonical and language-consistent ("Buffy the Vampire
+                # Slayer"), whereas the shared prefix is whatever the release
+                # wrote ("Buffy contre les vampires") — keeping the latter put
+                # the same show under two spellings. The family is used only when
+                # nothing was identified, which is exactly the anime case it was
+                # written for.
+                if fam and not (meta and meta.get("id")):
                     eff["title"] = fam
                     eff["_family"] = fam
                     eff["author"] = None      # series are flat: no author level
+                if fam:
                     episode_dirs.setdefault(dir_rel, folder_eps)
                 # the folder reading supplies (season, episode); a "./Saison N"
                 # component or the filename may have supplied either already, and
