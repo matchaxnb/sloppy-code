@@ -711,16 +711,21 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None, tmdb=No
     # mints a __dup otherwise), so every presentation after the first takes its
     # family label as an edition tag: "Title (Year) [16:9]" / "... [4:3]" and, when
     # the aspect class is shared but the audio differs, the language instead.
+    # Family labels, used only when a group keeps more than one presentation (the
+    # sole case where names must differ). Windows-illegal characters must never
+    # reach a filename — ':' and '/' are both forbidden — so the aspect ratio is
+    # 'x' and a language set is '-joined'. (The label is appended AFTER
+    # route()/sanitize(), so it would otherwise bypass the illegal-char filter.)
     fam_labels = {}
     if len(keepers) > 1:
         aspects = [M.aspect_class(feats[p]) for p in keepers]
         for p in keepers:
-            fk = M.presentation_key(feats[p])
-            if aspects.count(M.aspect_class(feats[p])) > 1:
-                langs = sorted(fk[1])
-                fam_labels[p] = "/".join(langs).upper() if langs else M.aspect_class(feats[p])
+            asp, langs = M.presentation_key(feats[p])
+            asp = asp.replace(":", "x")
+            if aspects.count(M.aspect_class(feats[p])) > 1 and langs:
+                fam_labels[p] = "-".join(sorted(langs)).upper()   # aspect shared: name the languages
             else:
-                fam_labels[p] = M.aspect_class(feats[p])
+                fam_labels[p] = asp
     alts = eff.get("_alternatives") or []
     for p in keepers:
         # Per-file feature dict: the quality tag must describe THIS file, not the
