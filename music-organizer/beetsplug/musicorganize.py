@@ -156,8 +156,23 @@ class MusicOrganizePlugin(BeetsPlugin):
             force = bool(opts.force) or self.config["force"].get(bool)
             write_tags = self.config["write_tags"].get(bool)
 
-            query = " ".join(args) if args else None
-            albums = list(lib.albums(query))
+            # Scope by *item* path when a query is given: an Album's `path`
+            # is a computed destination directory, not its source location,
+            # so a `path::` query against albums matches nothing. Items carry
+            # the real source paths.
+            #
+            # Pass argv straight through as a sequence: `lib.*` parses a
+            # sequence component-wise, whereas a joined string would go
+            # through `shlex.split` and tear paths containing spaces apart.
+            if args:
+                album_ids = {
+                    item.album_id for item in lib.items(args) if item.album_id
+                }
+                albums = [
+                    a for a in (lib.get_album(i) for i in album_ids) if a
+                ]
+            else:
+                albums = list(lib.albums())
 
             groups = defaultdict(list)
             for album in albums:

@@ -20,7 +20,7 @@ library: /mnt/largepool/bulk/MediaLibrary/.music-organizer/staging.db
 directory: /mnt/largepool/bulk/MediaLibrary/Music
 statefile: /mnt/largepool/bulk/MediaLibrary/.music-organizer/state.pickle
 
-plugins: musicbrainz musicorganize
+plugins: musicbrainz musicorganize mbcache
 # Directory whose children ARE the plugin modules: beets prepends this to
 # `beetsplug.__path__`, so `beetsplug.musicorganize` resolves to
 # `<pluginpath>/musicorganize.py`.
@@ -66,7 +66,11 @@ musicbrainz:
   # Populate the release group id and country, which the grouping and the
   # ranking both use.
   extra_tags: [catalognum, country, label, media, tracks, year]
-  search_limit: 5
+  # One candidate is enough: the ranking that matters (lossless/tracks/
+  # duration/country) is computed from the *files*, not from candidates.
+  # MusicBrainz rate-limits at 1 req/s, so every extra candidate is a
+  # second per album across ~1800 albums.
+  search_limit: 1
 
 # ------------------------------------------------------------------ paths
 # Album dir:  Artist Name - Album Name (Release year)
@@ -99,3 +103,10 @@ aunique:
 per_disc_numbering: no
 original_date: no
 art_filename: cover
+
+mbcache:
+  # Persist every MusicBrainz response to SQLite. beets caches nothing to disk
+  # by itself: a re-import (or a second source tree holding the same release)
+  # re-queries MusicBrainz in full.
+  cache: /mnt/largepool/bulk/MediaLibrary/.music-organizer/mbcache.db
+  enabled: yes
