@@ -29,7 +29,19 @@ flowchart TD
   C --> D["rank: lossless > lossy<br/>tracks > duration > JP > year"]
   D -->|"FICLONE shim"| E["Artist Name - Album Name (Year)/NN Title.ext"]
   E --> F["normalized tags written<br/>into the CLONE only"]
+  B -.->|"shared"| G["mbcache.db<br/>every MB response"]
 ```
+
+`mbcache.db` is the `mbcache` plugin: beets persists **nothing** from
+MusicBrainz to disk, so without it any re-import (or a second source tree
+holding the same release) re-queries everything. Every API call funnels through
+one method, `MusicBrainzAPI._get_resource`, which the plugin wraps. Measured:
+0.25 s live, 0.00 s on the cached repeat with an identical payload.
+
+Rate limiting is beets' own and needs no tuning: musicbrainz.org is queried at
+`per_second=1.0` (the documented maximum) and a 429 is retried with
+`Retry(total=6, backoff_factor=0.5)`. We query as fast as the host allows and
+never harder.
 
 Two phases, deliberately:
 
@@ -43,6 +55,18 @@ Cloning is a separate pass on purpose. Cloning first and deleting losers later
 is expensive on ZFS for no benefit: freeing shared blocks churns the
 block-reference table, and `rm` of a reflinked tree sits in `D` state for
 minutes (documented in `media-organizer/README.md`).
+
+## Layout
+
+```
+config.yaml                  the beets config (paths, import policy, matching)
+beetsplug/musicorganize.py   the `musicorganize` command
+beetsplug/mbcache.py         persists MusicBrainz responses to SQLite
+shim/reflink.py              FICLONE reflink module (shadows the PyPI package)
+install.sh                   idempotent deploy: venv, shim, units
+run-full.sh                  index everything, then curate (tmux-friendly)
+systemd/*.service, *.timer   daily index; manual organize
+```
 
 ## Naming
 
