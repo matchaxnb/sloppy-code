@@ -178,48 +178,66 @@ compilation) — a separate rename-phase worker, run after makemkv:
 
 ```sh
 ./.venv/bin/python anthology_names.py MediaLibrary/Remuxes/<Disc> --apply \
-    --domain cartoon-classic [--grid 4x4] [--window 18]
+    --domain cartoon-classic --keyframes --grid 3x3 [--window 24]
 ```
 
-**What works (measured on Tex Avery Disc 1, 17 shorts):**
+**Frame sampling (`--keyframes`, preferred).** Decode **only I-frames**
+(`-skip_frame nokey`) and keep roughly one per 2 s. A Blu-ray's keyframes are ~1 s
+apart (GOP ≈ 24 at 24 fps) and far denser at cuts; a title card dwells 3–5 s, so a
+2 s cadence cannot miss one while dropping the cut clusters that would otherwise
+fill montage slots with near-identical frames. It is also far cheaper than the
+`fps` filter. **Do not use `-vsync`** — it was removed in ffmpeg n9; decoding to
+images uses `-fps_mode passthrough`. Without `--keyframes` the older `fps`-filter
+sampling (`sample_frames`) is used.
 
-- **A title card in the first ~18 s**, read by the VLM from a **montage grid**
-  (4×4) of frames — one image, so the whole card sequence (studio → series banner
-  → character card → title) is visible at once. ~14–15/17 correct.
-- **Window size dominates grid size.** Sampling beyond ~18 s pulls *in-film
-  signage* ("MALIBU SALOON", "SWING SWING PRISON") which the model mistakes for
-  the title. Tight window, dense (every ~1.2 s): `DUMB-HOUNDED` and
-  `MERRIE MELODIES → Dangerous Dan McFoo` read correctly only this way.
+**Grid density: 3×3, not 4×4.** Each tile is 640×480 and `xstack` does not rescale,
+so a 4×4 montage is 2560×1920 — which the vision model downsizes until each tile
+is unreadable. Measured on Tex Avery vol. 1: **4×4 → 7/19 titles, 3×3 → 18/19,
+2×2 → fine too.** Denser is not better; past ~2 MP the tiles blur faster than the
+extra context helps.
+
+**Safe-zone crop (`SAFE_ZONE = 0.88`).** Title cards and credits sit inside the
+title-safe area, so a centred 88% crop discards the frame border and gives each
+tile more usable resolution (tiles are padded back to 4:3, so the grid stays even).
+
+**What works (measured):**
+
+- **A title card in the opening**, read by the VLM from a **montage grid** — one
+  image, so the whole card sequence (studio → series banner → character card →
+  title) is visible at once.
+- **Window size dominates.** Sampling beyond ~18–24 s pulls *in-film signage*
+  ("MALIBU SALOON") which the model mistakes for the title; `--window 24` with
+  keyframes is the sweet spot.
 - **Domain prompt matters.** `--domain cartoon-classic` seeds a reject list —
-  characters (Bugs Bunny, Mickey Mouse, Droopy…), series banners (Merrie
-  Melodies, Looney Tunes…), studios (MGM, Warner Bros…), credit/certificate
-  lines — because those read at confidence 1.0 and would otherwise win.
-- **Confidence cannot arbitrate** (character card and title card both 1.0); the
-  choice is by *content*: `pick_title` collects every card and asks the model
-  which names the film.
+  characters, series banners, studios, credit/certificate lines — because those
+  read at confidence 1.0 and would otherwise win.
+- **Content beats confidence.** `pick_title` collects every card; character card
+  and title card both read 1.0, so the choice is by *content*, not score.
+- **The umbrella rule (generic):** a card naming a recurring character, franchise
+  or sub-series (Droopy, Tom and Jerry, …) is the **SERIES**, not the title; the
+  individual work has its own title card. This is what turns a bare `DROOPY` into
+  `WAGS to RICHES` / `DAREDEVIL, DROOPY`. It is phrased generically on purpose —
+  no per-studio name lists to overfit.
+- **The credited-card rule:** when the grid's pick is missing or a bare character
+  name, `_title_from_credited_card` reads frames individually and, on a card
+  showing `Directed by`, hands *the text above the credit* back to the model.
 - **Chapter count** flags a "play-all" (many chapters) for splitting rather than
-  naming it after its first short. Renaming is `os.rename` — metadata, not a
-  reflink, so it is cheap.
-- Unresolved → `UNKNOWN` → review file, never a wrong guess.
+  naming it after its first short. Renaming is `os.rename` — metadata, cheap.
 
-**The credited-card rule (the key one):** when the grid's pick is missing or is a
-bare character name (`DROOPY`) while a title shares that word (`SEÑOR DROOPY`),
-`_title_from_credited_card` reads frames individually and, on a card showing
-`Directed by`, hands *the text above the credit* back to the model to name — one
-rule, not per-title special cases. This is what resolves the Droopy films.
+**Measured results (Tex Avery Screwball Classics, keyframes + 3×3 + cartoon-classic):**
 
-**Limitations (measured, not hidden):** a title shown **in media res** is missed
-by both the first-window and a scene-change pass — the subtitle fallback is the
-path for that. The model still occasionally reorders a two-word title
-(`Homesteader Droopy` → "Droopy, Homesteader") or reads a decoy; unresolved
-answers go to the review file rather than being guessed. Domain classification
-(form = animated/live-action, structure = short/feature/series-episode, style as
-a free note) is **advisory only** — it selects the title prompt, never gates the
-read; it mislabels a fiction shot like a documentary (`Lutine`).
+- **vol. 1** (`00003mpls_t*.mkv`, 19 shorts): **19/19** named.
+- **vol. 2** (`00024mpls_t*.mkv`, 22 items): **21/22** named. The one miss is a
+  52-minute censored-material documentary compilation with **no title card** —
+  correctly left in `review-titles.txt` rather than guessed.
+- Earlier D1–D4 set: ~62/64.
 
-**Result on the Tex Avery set:** ~62/64 shorts named correctly across D1–D4 (the
-local 8B VLM + ffmpeg, no OCR, no cloud); D5 is not an anthology (a French
-`TEX AVERY — UN UNIVERS EN FOLIE` feature) and was correctly left alone.
+**Limitations (measured, not hidden):** a title shown **in media res** is missed by
+the first-window pass; a work with **no title card** at all (the documentary) is
+unnameable by this method. The model occasionally reorders a two-word title
+(`Homesteader Droopy` → "Droopy, Homesteader") or reads a decoy; unresolved answers
+go to the review file, never a wrong guess. Domain classification is **advisory
+only** — it selects the title prompt, never gates the read.
 
 ### Raw DVD and ISO — remux, not reflink
 
