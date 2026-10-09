@@ -100,26 +100,46 @@ _TITLE_TOKEN_SPLIT_RE = re.compile(r"[\s._]+")
 def _file_episode_title(text: str) -> str | None:
     """The episode title written in a file name, if any.
 
-    Handles "Show - 1x01 - Title" and "Show S01E01 - Title" (scene dot forms
-    included). The quality/source tail always FOLLOWS the title, so the title is
-    everything up to the first quality token; a tail-only remainder (e.g.
-    "...S01E01.1080p.WEB-DL") yields None, so a nameless file is not mis-named
-    with a codec tag.
+    guessit is tried first: it knows release tags, codecs and groups and returns
+    the title from scenes like "...S01E01 1080p Welcome To The Hellmouth.HDTV.
+    DD2.0.x264". Its answer is authoritative — when it says there is no title,
+    the regex must not fill the gap with release noise ("...S02E01.1080p.WEB.
+    h264-KOGi" must stay title-less, not become "KOGi"). One form guessit misses
+    is a SPACE-SEPARATED title after the resolution ("Buffy S01E08 1080p Out Of
+    Mind, Out Of Sight.HDTV..."), so the regex runs only when the remainder
+    carries a space — a human-named file. A pure-dotted remainder is a scene
+    release whose trailing tokens are noise, so nothing is returned there. The
+    regex is also the whole story on a host without guessit (the dev box).
     """
+    try:
+        from guessit import guessit
+    except ImportError:
+        guessit = None
+    if guessit is not None:
+        try:
+            t = guessit(text).get("episode_title")
+        except Exception:
+            t = None
+        if t and str(t).strip():
+            return str(t).strip()
     m = re.search(r"(?i)(?:\bS\d{1,2}[\s._-]*E\d{1,3}\b|\b\d{1,2}x\d{2,3}\b)(?P<rest>.*)$", text)
     if not m:
         return None
     rest = re.sub(r"(?i)\.(?:mkv|mp4|avi|m4v|mov|ts|wmv|mpg|mpeg)$", "", m.group("rest"))
+    if guessit is not None and " " not in rest:
+        return None
     kept = []
     for tok in _TITLE_TOKEN_SPLIT_RE.split(rest):
         tok = tok.strip("[]{}")
         if not tok:
             continue
-        # A release group glued to the codec ("x264-GRP") must cut too, so the
-        # token is tested whole and up to its first dash.
         if _NOISE_TOKEN_RE.match(tok) or _NOISE_TOKEN_RE.match(tok.split("-", 1)[0]):
-            break
+            continue
         kept.append(tok)
+    # "...DD2.0.x264" splits into "DD2" (noise) and a stray "0"; drop trailing
+    # bare-number fragments so the title does not end with channel noise.
+    while kept and kept[-1].strip().isdigit():
+        kept.pop()
     return " ".join(kept).strip(" -_.") or None
 
 
