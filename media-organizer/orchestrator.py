@@ -168,6 +168,12 @@ def classify(path: str) -> str:
     # extension before the fallback, which exists for container video only.
     if ext in M.AUDIO_EXT:
         return "other"
+    # Archives, ROMs and disc images are never content and must not be probed:
+    # the mime fallback opens every unknown file, and a source root can hold tens
+    # of thousands of these parts (multi-part RAR `.r00..`, TOSEC ROM sets). A
+    # cheap extension test replaces a full read on the shared pool.
+    if ext in M.NONMEDIA_EXT or M._RAR_PART_RE.search(path):
+        return "other"
     if ext in M.VIDEO_EXT:
         return "video"
     if ext in M.SUB_EXT:

@@ -25,6 +25,33 @@ AUDIO_EXT = {".flac", ".mp3", ".aac", ".m4a", ".ogg", ".opus", ".wav", ".wma",
 AUX_EXT   = {".nfo", ".jpg", ".jpeg", ".png", ".webp", ".txt", ".cue"}
 SAMPLE_EXT = {".nfo"}  # .nfo is aux, but can be "sample.nfo"
 
+# Extensions that are NEVER library content and must not reach the `file(1)`
+# mime fallback in `classify()`. An unrecognised extension triggers a mime probe,
+# and a source root can hold tens of thousands of archive/ROM parts (multi-part
+# RAR `.r00..`, TOSEC `.d64/.tzx/.chd`, Amiga `.lha/.lzx`, `.hqx`, `.sit`…) —
+# each a full read on the shared pool for a guaranteed "other". Ambiguous
+# container formats are deliberately NOT here (`.bin`, `.dat`, `.iso`, `.img`,
+# `.cue`): they can be real content or a disc a later stage consumes, so they
+# keep their mime probe.
+NONMEDIA_EXT = {
+    # archives / compression / spanning sets
+    ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".zst", ".tgz", ".tbz2",
+    ".lha", ".lzh", ".lzx", ".arj", ".ace", ".cab", ".sit", ".sitx", ".hqx", ".sea",
+    ".par", ".par2", ".sfv",
+    # emulation disc/tape/cartridge images and save states
+    ".chd", ".d64", ".t64", ".d71", ".d81", ".tzx", ".tap", ".z80", ".sna", ".vsf",
+    ".rom", ".dsk", ".vga", ".lfl", ".map", ".d88", ".d77", ".st", ".msa", ".stx",
+    ".atr", ".prg", ".gba", ".gb", ".gbc", ".nds", ".3ds", ".cia", ".nes", ".fds",
+    ".snes", ".smc", ".sfc", ".z64", ".n64", ".v64", ".gen", ".sms", ".gg", ".a26",
+    ".a52", ".a78", ".col", ".int", ".vec", ".crt", ".pce",
+    # misc containers/sidecars that are never staged
+    ".rmp", ".lof", ".m3u", ".pls", ".nzb", ".torrent", ".pdf", ".epub", ".mobi",
+    ".cbz", ".cbr", ".cb7", ".cbt", ".webarchive", ".dvdmedia",
+}
+# Multi-part RAR volume suffix: a name ENDS in .rar, .r00, .r99 or .r01x, or in
+# a ".partNN.rar" form. Matched by pattern because the numeric part varies.
+_RAR_PART_RE = re.compile(r"(?i)\.(?:r\d{2,3})$|\.part\d+\.rar$")
+
 # ---------------------------------------------------------------- parse
 _ANIME_GROUP = re.compile(r"^\[([^\]]+)\]\s*")
 _ANIME_EPISODE = re.compile(r"\b(\d{1,4})(?:v(\d+))?\b")
