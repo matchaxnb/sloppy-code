@@ -1,0 +1,31 @@
+[Unit]
+Description=beets: refresh the MusicLibrary staging database (index only)
+Documentation=file:///home/omp-agent/music-organizer/README.md
+# Only needs the pool mounted and network for MusicBrainz lookups.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/omp-agent/music-organizer
+
+# The FICLONE shim shadows any installed `reflink` distribution.
+Environment=PYTHONPATH=/home/omp-agent/music-organizer/shim
+Environment=BEETSDIR=/home/omp-agent/music-organizer
+
+# Index phase: copy off, write off -> tags/MB matches go to the DB only and
+# no source file is ever modified. Incremental, so re-runs are cheap and
+# already-indexed directories make zero API calls.
+ExecStart=/home/omp-agent/music-organizer/.venv/bin/beet \
+    -c /home/omp-agent/music-organizer/config.yaml \
+    import -C -W \
+    /mnt/largepool/bulk/Music/CleanFLAC \
+    /mnt/largepool/bulk/Music/VGM \
+    /mnt/largepool/bulk/Music/CleanMP3
+
+# The pool is shared; keep the timer's job polite.
+Nice=10
+IOSchedulingClass=idle
+
+# A wedged import must not pile up behind its successor.
+TimeoutStartSec=6h

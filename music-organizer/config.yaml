@@ -1,0 +1,101 @@
+# beets configuration for the MusicLibrary curation pipeline.
+#
+# Two phases share this one config:
+#
+#   index   beet import -C -W   (copy off, write off)
+#           -> tags and MusicBrainz matches go to the DB only.
+#              Source files are opened read-only and never modified.
+#
+#   organize beet musicorganize
+#           -> reflink the winner of each work into `directory`,
+#              then write normalized tags into the clone.
+#
+# Sources (immutable) / destination:
+#   /mnt/largepool/bulk/Music/CleanFLAC   lossless archives
+#   /mnt/largepool/bulk/Music/VGM         sequenced music
+#   /mnt/largepool/bulk/Music/CleanMP3    lossy
+#   -> /mnt/largepool/bulk/MediaLibrary/Music
+
+library: /mnt/largepool/bulk/MediaLibrary/.music-organizer/staging.db
+directory: /mnt/largepool/bulk/MediaLibrary/Music
+statefile: /mnt/largepool/bulk/MediaLibrary/.music-organizer/state.pickle
+
+plugins: musicbrainz musicorganize
+# Directory whose children ARE the plugin modules: beets prepends this to
+# `beetsplug.__path__`, so `beetsplug.musicorganize` resolves to
+# `<pluginpath>/musicorganize.py`.
+pluginpath: /home/omp-agent/music-organizer/beetsplug
+
+# ------------------------------------------------------------------ import
+import:
+  # The index phase must not touch a source file or consume space.
+  copy: no
+  write: no
+  move: no
+  # Autotag fills MusicBrainz ids (release-group, country) into the DB only.
+  autotag: yes
+  # Unattended: never prompt. When nothing scores as a strong match, keep the
+  # files' own tags rather than skipping the album.
+  quiet: yes
+  quiet_fallback: asis
+  none_rec_action: asis
+  default_action: apply
+  # Timer-friendly: skip directories already in the import history.
+  incremental: yes
+  incremental_skip_later: no
+  resume: no
+  # `reflink` is intentionally unset here: cloning is done by the
+  # `musicorganize` command, which uses `MoveOperation.REFLINK` directly.
+  # (beets' own import.reflink calls the same `beets.util.reflink`, so the
+  #  shadowing shim in ./shim applies either way.)
+
+# -------------------------------------------------------------- matching
+# Country preference is NOT set here: "Japanese release > rest of the world"
+# is decided by the command's ranking (compare-count, then duration, then
+# country), so that shorter-but-Japanese pressings do not silently win.
+match:
+  strong_rec_thresh: 0.04
+  distance_weights:
+    media: 2.0
+    country: 1.0
+    year: 1.0
+    album_id: 5.0
+    tracks: 2.0
+
+musicbrainz:
+  # Populate the release group id and country, which the grouping and the
+  # ranking both use.
+  extra_tags: [catalognum, country, label, media, tracks, year]
+  search_limit: 5
+
+# ------------------------------------------------------------------ paths
+# Album dir:  Artist Name - Album Name (Release year)
+# Track:      NN Title.ext   (beets zero-pads $track to 2 digits)
+# %aunique{} is intentionally absent: with the (year) in the directory name,
+# two same-artist same-title releases from different years already differ.
+# Same artist, same album, same year is treated as one work by the grouper
+# above, so no disambiguation suffix is needed.
+paths:
+  default: $albumartist - $album ($year)/$track $title
+  singleton: Singles/$artist - $title
+  comp: $albumartist - $album ($year)/$track $title
+
+# Windows/SMB-safe names, on top of beets' defaults.
+replace:
+  '[<>:"\?\*\|]': _
+  '[\\/]': _
+  '[\x00-\x1f]': _
+  '^\.': _
+  '\.$': _
+  '\s+$': ''
+  '^\s+': ''
+  '^-': _
+
+aunique:
+  keys: albumartist album year
+  disambiguators: albumtype label catalognum albumdisambig
+  bracket: '[]'
+
+per_disc_numbering: no
+original_date: no
+art_filename: cover

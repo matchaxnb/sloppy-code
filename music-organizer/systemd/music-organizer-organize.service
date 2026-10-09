@@ -1,0 +1,28 @@
+[Unit]
+Description=beets: reflink the best release of each work into the Library
+Documentation=file:///home/omp-agent/music-organizer/README.md
+# Runs after the index has something to work with.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/omp-agent/music-organizer
+
+Environment=PYTHONPATH=/home/omp-agent/music-organizer/shim
+Environment=BEETSDIR=/home/omp-agent/music-organizer
+
+# Clones the winner of every work and writes normalized tags into the clone.
+# Not on a timer by default: run it by hand when you want the library
+# refreshed, or enable music-organizer-organize.timer.
+ExecStart=/home/omp-agent/music-organizer/.venv/bin/beet \
+    -c /home/omp-agent/music-organizer/config.yaml \
+    musicorganize
+
+# Cloning is serialized on purpose: a block-clone updates the block-reference
+# table and must be committed by a txg, so concurrency multiplies pressure
+# for no throughput gain. One process, low priority.
+Nice=15
+IOSchedulingClass=idle
+
+TimeoutStartSec=12h

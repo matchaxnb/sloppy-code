@@ -1,0 +1,15 @@
+[Unit]
+Description=Periodically refresh the MusicLibrary staging database
+Documentation=file:///home/omp-agent/music-organizer/README.md
+
+[Timer]
+# Daily at 03:30, plus a random spread so it never lands in lockstep with
+# the pool's other nightly work (scrubs, snapshots, the media-organizer).
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=30m
+# A missed window (host asleep/off) runs once on the next boot.
+Persistent=true
+Unit=music-organizer-index.service
+
+[Install]
+WantedBy=timers.target

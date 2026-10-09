@@ -1,0 +1,29 @@
+# music-organizer — generated and local-only files
+#
+# State lives outside the source tree by default
+# (`/mnt/largepool/bulk/MediaLibrary/.music-organizer`). These rules cover the
+# case where a checkout is used directly as BEETSDIR.
+
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# beets library / state, if ever pointed into the checkout
+*.db
+*.db-wal
+*.db-shm
+*.db-before-*.bak
+*.pickle
+*.sqlite
+*.sqlite3
+
+# Handover notes are local-only, never committed
+HANDOVER.md
+
+# Scratch
+/tmp/
+/scratch/
