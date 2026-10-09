@@ -110,24 +110,64 @@ multi-part title is not a short) and `_JUNK_` (media from bad sources, e.g.
 
 ## Selection: which version wins
 
-`quality_score()` returns a tuple, most significant first:
+### One file per presentation
+
+A group is not reduced to a single file. Versions are grouped into
+**presentations**, and **one file is kept per presentation**:
+
+> **presentation = (aspect class, audio-language set)**
+
+- **Aspect class** (`aspect_class`): `4:3` vs `16:9`, read from the probed
+  width/height. A widescreen release of a 4:3 show is usually a pan-and-scan
+  *crop* that loses picture, so it is a different presentation, not a better one.
+  (The Buffy case: the 16:9 "popcorn" set and the open-matte 4:3 box set are both
+  wanted.)
+- **Audio languages** (`audio_languages`): a dub-only release and one carrying the
+  original audio are different presentations; both are kept.
+
+Grouping is by **compatibility, not exact equality** — a file whose languages
+could not be probed must not split off a phantom family from an otherwise
+identical file (same aspect + equal languages *or either side unknown* = one
+presentation). Empty dimensions collapse to `16:9`, so a never-probed file does
+not mint a phantom 4:3 family either.
+
+Within a presentation, `quality_score()` decides the winner — so a 4K beats a
+1080p and only the 4K is kept (same presentation, best resolution). Across
+presentations both survive. When a group has more than one presentation, each
+name takes its family label as an edition so Jellyfin does not mint a `__dup`:
+
+```
+S01E06 - The Pack [DVD] [4:3].mkv
+S01E06 - The Pack [1080p Web] [16:9].mkv
+```
+
+The quality tag is built **per file** (the tag in brackets describes *that* file,
+not the group's primary).
+
+### The score (`quality_score()`)
+
+Returns a tuple, most significant first:
 
 1. **original-language audio present** (or multi-lingual including it)
-2. **resolution** (`8k` … `480p`)
-3. **source authenticity** — `remux` > `blu-ray` encode > **raw disc (`m2ts`)**
+2. **4:3 presentation, TV only** (`_is_43`, kind `tv`) — protects a 4:3 show from
+   losing to a widescreen *crop* on resolution. Films are natively widescreen and
+   are never downgraded for being so.
+3. **resolution** (`8k` … `480p`)
+4. **source authenticity** — `remux` > `blu-ray` encode > **raw disc (`m2ts`)**
    > `web-dl`/iTunes > `webrip` > `hdtv`/`dvdrip`
-4. HDR
-5. bit depth
-6. bitrate
+5. HDR
+6. bit depth
+7. bitrate
 
-Axis 1 dominates deliberately: a dub-only release can never outrank the original
-regardless of bitrate. Axis 3 encodes your "remux better than raw blu-ray" rule —
-a disc stream is authentic but is not a finished library file, so an encode beats
-it.
+Axis 1 dominates deliberately: a dub-only release can never outrank an
+original-audio copy *within a presentation*. Axis 3 encodes your "remux better
+than raw blu-ray" rule — a disc stream is authentic but is not a finished library
+file, so an encode beats it.
 
-Every rejected version is written to `<base>.alternatives.txt` beside the kept
-file, ranked, with its source path, score and byte size — so a "wrong" pick is
-always recoverable without re-scanning.
+Every rejected version is recorded in the store's **`alternative` table** (ranked,
+with source path, score and size). It is **not** written beside the file: a stray
+`.txt` is not library content and confuses Jellyfin. Render on demand instead.
+
 
 ## Grouping
 
