@@ -31,6 +31,13 @@ import config as C  # noqa: E402
 TEXT_SUB = {"subrip", "ass", "ssa", "mov_text", "webvtt", "text", "srt"}
 BITMAP_SUB = {"hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"}
 
+# Fraction of the frame kept when sampling, as a centred crop. Studio title cards
+# and credits sit inside the title-safe area, so the outer border is background
+# that costs the vision model pixels for nothing: cropping to ~88% keeps the card
+# while discarding the frame edge, giving each tile (or a finer grid) more usable
+# resolution. Tiles are padded back to 4:3 afterwards, so the montage stays even.
+SAFE_ZONE = 0.88
+
 SYS = ("You are given the subtitles (or on-screen text) from the OPENING of a "
        "short film. Identify the title of the work, and the series it belongs "
        "to if there is one. Answer with exactly three fields separated by '||', "
@@ -82,7 +89,14 @@ SYS_CARTOON = (
     f"- a credit or certificate line: {CARTOON_CREDITS}\n"
     "- a scenery/background credit, e.g. 'THE PAINTED DESERT / PAINTED BY ...', "
     "or any card naming an artist, department or place rather than the film\n"
-    "If no tile shows the film's title, answer 'UNKNOWN || none || 0'.")
+    "A card may name a recurring character, franchise or sub-series the work "
+    "belongs to rather than the work itself. That is the SERIES, not the TITLE: "
+    "an individual work has its OWN title card, when one is present, usually "
+    "elsewhere in the grid. Prefer the individual title over any umbrella name, "
+    "and never answer an umbrella name as the TITLE. If only a "
+    "character/franchise/sub-series card is visible and no distinct individual "
+    "title appears, answer 'UNKNOWN || <that name> || 0'.\n"
+    "If no tile shows the work's title, answer 'UNKNOWN || none || 0'.")
 
 
 def probe_subs(path: str) -> list[dict]:
@@ -245,11 +259,39 @@ def sample_frames(path: str, window: int, outdir: str, every: float = 2.0) -> li
     card. One ffmpeg pass with `fps` — seeking per-frame spawned a process for
     each frame and dominated the run."""
     subprocess.run(["ffmpeg", "-v", "error", "-t", str(window), "-i", path,
-                    "-vf", (f"fps=1/{every:g},scale=640:480:force_original_aspect_ratio=decrease,"
+                    "-vf", (f"crop=iw*{SAFE_ZONE}:ih*{SAFE_ZONE},"
+                            f"fps=1/{every:g},scale=640:480:force_original_aspect_ratio=decrease,"
                             "pad=640:480:(ow-iw)/2:(oh-ih)/2"),
                     "-y", os.path.join(outdir, "f_%03d.png")],
                    capture_output=True, text=True, timeout=180)
     return sorted(os.path.join(outdir, f) for f in os.listdir(outdir) if f.startswith("f_"))
+
+
+def sample_keyframes(path: str, window: int, outdir: str, every: float = 2.0) -> list[str]:
+    """Decode only KEYFRAMES and keep roughly one per `every` seconds.
+
+    Keyframes are ~1 s apart on a Blu-ray (GOP ≈ 24 at 24 fps) but far denser
+    around cuts; a title card dwells 3-5 s, so a 2 s cadence cannot miss a card
+    while discarding the cut clusters that would fill montage slots with
+    near-identical frames. Decoding I-frames only is far cheaper than the `fps`
+    filter in `sample_frames`. NOTE: `-vsync` was removed in ffmpeg n9 — decoding
+    to images uses `-fps_mode passthrough`, which keeps exactly the decoded
+    keyframes.
+    """
+    subprocess.run(["ffmpeg", "-v", "error", "-t", str(window), "-skip_frame", "nokey",
+                    "-i", path, "-fps_mode", "passthrough",
+                    "-vf", f"crop=iw*{SAFE_ZONE}:ih*{SAFE_ZONE},"
+                           "scale=640:480:force_original_aspect_ratio=decrease,"
+                           "pad=640:480:(ow-iw)/2:(oh-ih)/2",
+                    "-f", "image2", "-y", os.path.join(outdir, "k_%05d.png")],
+                   capture_output=True, text=True, timeout=180)
+    ks = sorted(os.path.join(outdir, f) for f in os.listdir(outdir) if f.startswith("k_"))
+    if not ks:
+        return []
+    # Subsample to the cadence: keyframes are near-uniform away from cuts, so
+    # (count / window) is their rate and `every` seconds is `every * rate` frames.
+    step = max(1, int(round(every * len(ks) / max(1.0, float(window)))))
+    return ks[::step]
 
 
 def ask_questions(mp_path: str, questions: list, system: str = SYS,
@@ -504,7 +546,8 @@ def _title_from_credited_card(pngs: list[str]) -> tuple[str, str]:
 
 
 def title_for(path: str, window: int, frames: bool = True,
-              domain: str | None = None, grid: str = "4x4") -> tuple[str, str, float, str]:
+              domain: str | None = None, grid: str = "3x3",
+              keyframes: bool = False) -> tuple[str, str, float, str]:
     """(title, series, confidence, method) for one file. method: frames|image|text|none.
 
     A **title card** in the video is the reliable signal — it carries the work's
@@ -535,7 +578,13 @@ def title_for(path: str, window: int, frames: bool = True,
             # in-film signage ("MALIBU SALOON") which the model then mistakes for
             # the title. A tight, dense window beats a wide one: context *quality*
             # over quantity. `window` raises it for titles whose card comes late.
-            pngs = sample_frames(path, min(window, 18), td, every=1.2)
+            if keyframes:
+                # Decode only keyframes, subsampled to a 2 s cadence: a title
+                # card dwells 3-5 s, so this cannot miss one, and it avoids the
+                # fps-filter decode (far cheaper on a long Blu-ray title).
+                pngs = sample_keyframes(path, min(window, 24), td, every=2.0)
+            else:
+                pngs = sample_frames(path, min(window, 18), td, every=1.2)
             if pngs:
                 # A montage may hold several cards: a bare CHARACTER name
                 # ("DROOPY" + certificate) and the real TITLE card. Confidence is
@@ -696,7 +745,10 @@ def main(argv=None) -> int:
     ap.add_argument("--min-confidence", type=float, default=0.6)
     ap.add_argument("--review", default=None, help="review file (default: <dir>/review-titles.txt)")
     ap.add_argument("--window", type=int, default=120, help="seconds from the start to read")
-    ap.add_argument("--grid", default="4x4", help="montage density, e.g. 4x4 (default) or 2x2")
+    ap.add_argument("--grid", default="3x3", help="montage density, e.g. 3x3 (default) or 2x2. "
+                    "A 4x4 grid makes a 2560x1920 montage, which the vision "
+                    "model downsizes until each 640x480 tile is unreadable; 3x3 "
+                    "(1920x1440) keeps card text legible.")
     ap.add_argument("--domain", default=None,
                     help="domain hint (e.g. cartoon-classic) to tune the title prompt; "
                          "advisory only. 'auto' classifies per file.")
@@ -707,6 +759,8 @@ def main(argv=None) -> int:
                          "title; the longest file (by duration) is the feature and "
                          "is renamed to it. Other files are left for review.")
     ap.add_argument("--dry-run", action="store_true", help="force propose-only")
+    ap.add_argument("--keyframes", action="store_true",
+                    help="sample decoded KEYFRAMES at a 2s cadence instead of an fps filter")
     args = ap.parse_args(argv)
 
     d = os.path.abspath(args.dir)
@@ -742,7 +796,8 @@ def main(argv=None) -> int:
             if dom == "auto":
                 dom = domain_style_file(p, args.window)   # advisory hint
             title, series, conf, method = title_for(p, args.window, frames=not args.no_frames,
-                                                    domain=dom, grid=args.grid)
+                                                    domain=dom, grid=args.grid,
+                                                    keyframes=args.keyframes)
         except subprocess.SubprocessError as e:
             title, series, conf, method = "", "", 0.0, f"error:{e}"
         series = normalize_title(series, "") if series else ""   # tidy; series is not de-truncated
