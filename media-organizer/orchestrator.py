@@ -1310,7 +1310,9 @@ def plan_collisions(ops, dest_root):
     for op in ops:
         if op.get("kind") == "marker":
             continue
-        key = os.path.join(op["dest_dir"], op["name"])
+        # case-folded key: on a case-insensitive host two spellings are one path,
+        # so they ARE a collision (and must be reported, not silently fought over)
+        key = os.path.join(op["dest_dir"], op["name"]).lower()
         seen.setdefault(key, []).append(op["src"])
     return {k: v for k, v in seen.items() if len(v) > 1}
 
@@ -1375,6 +1377,35 @@ def clone_serialized(src: str, dst: str, dry: bool = False, recursive: bool = Fa
         delay = _clone_settle()
         if delay > 0:
             time.sleep(delay)
+
+
+def resolve_case(path: str) -> str:
+    """Return the on-disk path that matches `path` case-insensitively.
+
+    The library is treated as case-INSENSITIVE because it is consumed by Windows
+    hosts over SMB, where "Buffy The Vampire Slayer" and "Buffy the Vampire
+    Slayer" are the SAME directory. On a case-sensitive host (this one) treating
+    them as different created a phantom twin folder holding 288 duplicate files.
+    So each component is matched against what actually exists, taking the real
+    casing; only a component with no existing match keeps its planned form (a
+    genuinely new folder). This makes the writer converge on one path per logical
+    item regardless of which spelling an earlier run used.
+    """
+    if not path:
+        return path
+    absolute = path.startswith(os.sep)
+    parts = [p for p in path.split(os.sep) if p != ""]
+    cur = os.sep if absolute else ""
+    for comp in parts:
+        try:
+            names = os.listdir(cur or ".")
+        except OSError:
+            # a component we cannot list: fall back to the planned form for the rest
+            return os.path.join(cur, comp) if cur else comp
+        lc = comp.lower()
+        match = next((n for n in names if n.lower() == lc), None)
+        cur = os.path.join(cur, match if match is not None else comp)
+    return cur
 
 
 def delete_reflink(path: str) -> None:
@@ -1469,6 +1500,10 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
                             "status": f"stopped after {budget.done} clones (budget)"})
             break
         dst = os.path.join(dest_root, op["dest_dir"], op["name"])
+        # Fold onto the existing casing: on a case-insensitive host the two are
+        # one path, and creating the planned spelling beside an existing folder of
+        # another case is what minted the phantom twin (288 duplicate files).
+        dst = resolve_case(dst)
         dst_abs = os.path.realpath(os.path.dirname(dst))
         # hard guard: never write into a source tree
         if any(dst_abs == r.rstrip("/") or (dst_abs + os.sep).startswith(r) for r in src_roots):
@@ -1489,7 +1524,7 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
             except OSError as e:
                 results.append({"src": op["src"], "dst": dst, "status": f"marker failed: {e}"})
             continue
-        relkey = os.path.join(op["dest_dir"], op["name"])
+        relkey = os.path.join(op["dest_dir"], op["name"]).lower()
         if relkey in contended:
             results.append({"src": op["src"], "dst": dst, "status": "skipped (plan collision)"})
             continue
@@ -1501,7 +1536,11 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
         if rec and not dry:
             prev_dest, _prev_size = rec
             if os.path.exists(prev_dest):
-                if prev_dest == dst:
+                # case-insensitive: on a case-insensitive host a case-only
+                # difference is the same file, not a move
+                if prev_dest.lower() == dst.lower():
+                    if prev_dest != dst:
+                        _record(store, op, dst)      # adopt the on-disk casing
                     results.append({"src": op["src"], "dst": dst, "status": "skipped (placed)"})
                     continue
                 if not rename:
@@ -1572,7 +1611,9 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
     # it is dropped only here, after all of them have moved. The new dests are
     # collected first so a path that is still current is never removed.
     if not dry and store is not None and pre_placements:
-        planned = {os.path.realpath(os.path.join(dest_root, o["dest_dir"], o["name"]))
+        # Compare case-insensitively: a dest that differs only in case is the SAME
+        # file on a case-insensitive host, so it is still current, not superseded.
+        planned = {os.path.join(dest_root, o["dest_dir"], o["name"]).lower()
                    for o in ops if o.get("name")}
         dest_real = os.path.realpath(dest_root)
         superseded = {}
@@ -1580,10 +1621,9 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
             old = pre_placements.get(op["src"])
             if not old:
                 continue
+            if old.lower() in planned:
+                continue                      # still current (case-insensitively)
             oldr = os.path.realpath(old)
-            if oldr in planned or oldr == os.path.realpath(
-                    os.path.join(dest_root, op["dest_dir"], op["name"])):
-                continue                      # still current
             superseded[oldr] = old
         for oldr, old in superseded.items():
             if not oldr.startswith(dest_real) or not os.path.exists(old):
