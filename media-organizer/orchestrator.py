@@ -1405,7 +1405,7 @@ def delete_tree_paced(root: str, verbose: bool = True, budget=None) -> int:
 
 
 def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
-               budget=None, shared_dests=None, skip_kinds=()):
+               budget=None, shared_dests=None, skip_kinds=(), verbose_reconcile=False):
     """Apply a plan. `budget` is a CloneBudget capping successful reflinks.
 
     The stop is a deliberate, clean halt between clones: skipped ops do not
@@ -1419,6 +1419,15 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
     if skip_kinds:
         ops = [o for o in ops if o.get("kind") not in skip_kinds]
     results = []
+    # Snapshot the placements BEFORE applying: {src: dest}. Used at the end to
+    # retire destinations this plan superseded. Needed because a *shared* old
+    # dest (many sources collapsed onto one name by an earlier bug) cannot be
+    # deleted per-op — the other claimants still need it until each has been
+    # re-placed. Only after the whole plan has run is it safe to drop.
+    pre_placements = {}
+    if store is not None and not dry:
+        for s, d in store.all_placements():
+            pre_placements[s] = d
     # Destinations claimed by more than one source (an old collapse) cannot be
     # reused by rename. The counts come from the caller because the streaming
     # path calls this once per group and would otherwise only ever see one
@@ -1537,6 +1546,36 @@ def apply_plan(ops, dest_root, roots=None, dry=True, store=None, rename=False,
                 _record(store, op, dst)
         except subprocess.CalledProcessError as e:
             results.append({"src": op["src"], "dst": dst, "status": f"FAIL reflink: {e}"})
+
+    # Retire superseded destinations, now that every op has run. A source's OLD
+    # dest is superseded when this plan placed it somewhere else. Deleting per-op
+    # is wrong for a SHARED old dest (the earlier collapse put many sources on one
+    # path): the other claimants still need the file until each is re-placed, so
+    # it is dropped only here, after all of them have moved. The new dests are
+    # collected first so a path that is still current is never removed.
+    if not dry and store is not None and pre_placements:
+        planned = {os.path.realpath(os.path.join(dest_root, o["dest_dir"], o["name"]))
+                   for o in ops if o.get("name")}
+        dest_real = os.path.realpath(dest_root)
+        superseded = {}
+        for op in ops:
+            old = pre_placements.get(op["src"])
+            if not old:
+                continue
+            oldr = os.path.realpath(old)
+            if oldr in planned or oldr == os.path.realpath(
+                    os.path.join(dest_root, op["dest_dir"], op["name"])):
+                continue                      # still current
+            superseded[oldr] = old
+        for oldr, old in superseded.items():
+            if not oldr.startswith(dest_real) or not os.path.exists(old):
+                continue
+            try:
+                delete_reflink(old)
+                results.append({"src": None, "dst": old, "status": "superseded"})
+            except OSError as e:
+                results.append({"src": None, "dst": old, "status": f"supersede failed: {e}"})
+
     return results
 
 

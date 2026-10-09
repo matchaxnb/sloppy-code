@@ -283,6 +283,11 @@ class Store:
         r = self.db.execute("SELECT dest, src_size FROM placement WHERE src=?", (src,)).fetchone()
         return (r["dest"], r["src_size"]) if r else None
 
+    def all_placements(self) -> list:
+        """Every (src, dest) placement, for the end-of-run reconciliation."""
+        return [(r["src"], r["dest"]) for r in
+                self.db.execute("SELECT src, dest FROM placement")]
+
     def stats(self) -> dict:
         g = lambda q: self.db.execute(q).fetchone()[0]  # noqa: E731
         return {"lookup": g("SELECT COUNT(*) FROM lookup"),
