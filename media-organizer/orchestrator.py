@@ -1239,6 +1239,19 @@ def stream_apply(roots, dest_root, tmdb=None, store=None, probeworkers=3,
                    budget=budget, shared_dests=shared, rename=rename)
     elif bonuses and STAGE_BONUSES:
         stopped = True
+    # Drop placement rows whose destination is gone. A row is a memo of what we
+    # put where, not content: after renames/prunes (or a source that stopped being
+    # planned, like the .flac era) the row is simply wrong, and leaving it makes
+    # the next run reason about a dest that will never exist. Only when the run
+    # completed: a stopped run's dest set is partial.
+    if not dry and store is not None and not stopped:
+        try:
+            n = store.drop_dead_placements(os.path.exists)
+            if n and verbose:
+                print(f"  dropped {n} dead placement row(s)", flush=True)
+        except Exception as e:                       # never fail the run on hygiene
+            if verbose:
+                print(f"  ! placement prune failed: {e}", flush=True)
     if verbose:
         state = f"STOPPED early: clone budget {budget.done}/{budget.limit} reached" \
             if (budget.limit is not None and budget.exhausted()) else \

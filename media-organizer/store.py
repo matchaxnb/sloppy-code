@@ -288,6 +288,25 @@ class Store:
         return [(r["src"], r["dest"]) for r in
                 self.db.execute("SELECT src, dest FROM placement")]
 
+    def drop_dead_placements(self, exists) -> int:
+        """Delete placement rows whose destination is gone from disk.
+
+        The table is a memo of what we put where, not content: a row whose dest
+        no longer exists (the file was pruned, renamed by an external pass, or its
+        source stopped being planned — the `.flac` era, a source dropped from the
+        roots) is simply wrong, and leaving it makes the next run re-check a dest
+        that will never exist. `exists` is a callable so the caller controls the
+        filesystem check (and can dry-run it).
+        """
+        dead = [(r["src"],) for r in self.db.execute("SELECT src, dest FROM placement")
+                if not exists(r["dest"])]
+        if not dead:
+            return 0
+        with self._lock:
+            self.db.executemany("DELETE FROM placement WHERE src=?", dead)
+            self.db.commit()
+        return len(dead)
+
     def stats(self) -> dict:
         g = lambda q: self.db.execute(q).fetchone()[0]  # noqa: E731
         return {"lookup": g("SELECT COUNT(*) FROM lookup"),
