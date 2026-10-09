@@ -732,9 +732,15 @@ def plan_group(items, eff, meta, kind, season, episode, feats, ovr=None, tmdb=No
         label = fam_labels.get(p)
         r = M.route(p, eff, f, videos, from_filename=False, season=season, episode=episode)
         if label:
-            # apply the family label as an edition so names differ across families
-            base, ext = os.path.splitext(r["name"])
-            r = dict(r); r["name"] = f"{base} [{label}]{ext}"
+            # Apply the family label so names differ across families — MERGED into
+            # the existing quality bracket, not appended as a second one. Jellyfin
+            # reads one trailing `[tag]`; two bracket groups break the naming
+            # convention (and the mandate audit). "…[1080p Web] [16:9]" becomes
+            # "…[1080p Web 16:9]"; a file with no tag gets "[4:3]".
+            stem, ext = os.path.splitext(r["name"])
+            m = re.search(r"^(.*?) \[([^\]]+)\]$", stem)
+            stem = f"{m.group(1)} [{m.group(2)} {label}]" if m else f"{stem} [{label}]"
+            r = dict(r); r["name"] = stem + ext
         # Alternatives are NOT written beside the file: the rejection ranking is
         # provenance, not library content, and a stray .txt confuses Jellyfin.
         # It is kept on the op so the store records it, and can be rendered later.
