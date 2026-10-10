@@ -31,6 +31,7 @@ can be re-executed freely. ``--force`` re-does the work.
 
 from __future__ import annotations
 
+import os
 from collections import defaultdict
 
 from beets import ui
@@ -156,6 +157,8 @@ class MusicOrganizePlugin(BeetsPlugin):
             force = bool(opts.force) or self.config["force"].get(bool)
             write_tags = self.config["write_tags"].get(bool)
 
+            dest_bytes = normpath(dest)
+
             # Scope by *item* path when a query is given: an Album's `path`
             # is a computed destination directory, not its source location,
             # so a `path::` query against albums matches nothing. Items carry
@@ -171,6 +174,18 @@ class MusicOrganizePlugin(BeetsPlugin):
                 albums = [
                     a for a in (lib.get_album(i) for i in album_ids) if a
                 ]
+                # Scope to the requested albums, then re-scope *the group* to
+                # every other album sharing the same work identity. Without
+                # this, a per-album run sees exactly one candidate and can
+                # never collapse duplicates -- which is the whole point of the
+                # grouping. Grouping is the one operation that must be global.
+                keys = {_group_key(a) for a in albums}
+                albums = [
+                    a
+                    for a in lib.albums()
+                    if not any(i.get(SRC_ATTR) for i in a.items())
+                    or _group_key(a) in keys
+                ]
             else:
                 albums = list(lib.albums())
 
@@ -180,6 +195,7 @@ class MusicOrganizePlugin(BeetsPlugin):
 
             organized = 0
             skipped = 0
+            pruned = 0
             for key, members in sorted(groups.items()):
                 winner = max(members, key=_rank)
                 losers = [a for a in members if a is not winner]
@@ -200,13 +216,16 @@ class MusicOrganizePlugin(BeetsPlugin):
                         item[ROLE_ATTR] = "alternate"
                         item[GROUP_ATTR] = key
                         item.store()
+                    if not dry_run:
+                        pruned += self._prune_alternate(loser, dest_bytes)
 
                 organized += 1 if moved else 0
                 skipped += 0 if moved else 1
 
             ui.print_(
                 f"musicorganize: {len(groups)} works, "
-                f"{organized} organized, {skipped} skipped/unchanged"
+                f"{organized} organized, {skipped} skipped/unchanged, "
+                f"{pruned} stray alternate file(s) removed"
             )
 
         cmd.func = func
@@ -244,3 +263,30 @@ class MusicOrganizePlugin(BeetsPlugin):
             item.store()
             moved = True
         return moved
+
+    def _prune_alternate(self, album, dest_bytes) -> int:
+        """Remove a losing release's *destination* copies, if any.
+
+        A loser is normally un-cloned. But a release can be organized as a
+        winner in one run and lose to a better pressing later, leaving its old
+        copies in the destination. Those must go, or the library holds more
+        than one release per work.
+
+        The guard is absolute: only files that resolve *under the destination*
+        are ever removed, so a source file cannot be touched even if the
+        database says something odd.
+        """
+        removed = 0
+        for item in album.items():
+            src = item.get(SRC_ATTR)
+            if not src:
+                continue  # never cloned -> nothing in the destination
+            real = os.path.realpath(item.path)
+            if not real.startswith(os.path.realpath(dest_bytes) + os.sep):
+                continue
+            try:
+                os.unlink(real)
+                removed += 1
+            except OSError as exc:
+                self._log.warning("could not remove {}: {}", real, exc)
+        return removed

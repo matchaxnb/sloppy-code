@@ -42,4 +42,12 @@ run_source "$M/CleanFLAC"
 run_source "$M/VGM"
 run_source "$M/CleanMP3"
 
+# Final pass over *everything*. Per-album scoping cannot collapse a duplicate
+# work whose two releases were indexed in different iterations, so grouping
+# gets one global sweep at the end. Idempotent: already-organized items carry
+# `mo_source` and are skipped.
+log "=== FINAL GROUPING PASS (global) ==="
+"$V" -c "$C" musicorganize
+log "=== FINAL GROUPING PASS done ==="
+
 log "ALL DONE"
