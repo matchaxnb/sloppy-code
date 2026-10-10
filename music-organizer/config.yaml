@@ -32,6 +32,10 @@ import:
   copy: no
   write: no
   move: no
+  # Never import a partial download. The source tree holds incompletely
+  # fetched `*.flac.part` files, and beets imports them as albums otherwise
+  # (two such junk albums reached the destination before this rule existed).
+  ignore: ["*.part", "*.crdownload", "*.!ut", "*.tmp"]
   # Autotag fills MusicBrainz ids (release-group, country) into the DB only.
   autotag: yes
   # Unattended: never prompt. When nothing scores as a strong match, keep the
