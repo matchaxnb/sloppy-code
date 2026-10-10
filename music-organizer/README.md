@@ -177,6 +177,27 @@ without being cloned.
 * **Tag writing changes the clone's checksum.** Intended: the clone is the
   mutable object; the source is hash-verified as unchanged.
 
+## Migrating the legacy lyrics
+
+The old library (`Music/lyrics.db`) had lyrics and `lyrics_*` flexible
+attributes on 741 items. The new staging library is built from the source
+trees and inherits none of them, so:
+
+```sh
+python3 migrate_lyrics.py --dry-run   # report only
+python3 migrate_lyrics.py             # write
+```
+
+It matches each legacy row to a staging item **by exact source path first**
+(the staging DB records the absolute source path in `mo_source`, so the
+relative tail is exact and survives autotag rewriting artist/album
+spellings), falling back to normalized artist+album+title. Both the plain
+`lyrics` column and the four `lyrics_*` flexattrs are carried.
+
+Measured: 737 of 739 rows matched by path, 2 288 flexattrs written, 737 items
+carry lyrics afterwards, and a re-run is a no-op. `--dry-run` needs no care:
+it rolls back.
+
 ## Verifying it did not cost space, and did not touch a source
 
 **`stat %b` cannot tell you whether a clone is sharing blocks.** The honest
