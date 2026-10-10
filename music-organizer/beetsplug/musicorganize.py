@@ -250,17 +250,31 @@ class MusicOrganizePlugin(BeetsPlugin):
                 continue
 
             if not item.get(SRC_ATTR):
-                item[SRC_ATTR] = displayable_path(item.path)
+                # Hex-encode: a filename with invalid UTF-8 yields surrogate
+                # escapes (PEP 383), and sqlite refuses those. The value is
+                # only used as an "already organized" marker, and hex is
+                # lossless, unlike sanitising it.
+                item[SRC_ATTR] = os.fsencode(item.path).hex()
             item[ROLE_ATTR] = "winner"
             item[GROUP_ATTR] = key
 
-            # Clones and updates item.path; the source is only read.
-            item.move(operation=MoveOperation.REFLINK, basedir=dest_bytes)
+            # One unclonable track must not abort the rest of its album. Log
+            # and carry on; a re-run retries whatever failed.
+            try:
+                # Clones and updates item.path; the source is only read.
+                item.move(operation=MoveOperation.REFLINK, basedir=dest_bytes)
 
-            if write_tags:
-                item.try_write()
+                if write_tags:
+                    item.try_write()
 
-            item.store()
+                item.store()
+            except Exception as exc:
+                self._log.error(
+                    "could not organize {}: {}",
+                    displayable_path(item.path),
+                    exc,
+                )
+                continue
             moved = True
         return moved
 
