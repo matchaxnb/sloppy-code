@@ -32,6 +32,7 @@ can be re-executed freely. ``--force`` re-does the work.
 from __future__ import annotations
 
 import os
+import unicodedata
 from collections import defaultdict
 
 from beets import ui
@@ -63,20 +64,75 @@ def _is_lossless(item) -> bool:
     return (item.format or "").lower() in LOSSLESS_FORMATS
 
 
-def _group_key(album) -> str:
-    """Identity of the underlying *work*.
+# Typographic punctuation that NFKC does *not* fold to ASCII. Apostrophes and
+# quotes are the important ones: "B'z" and "B’z" are the same artist, but
+# NFKC leaves U+2019 alone, so without this they group as two works.
+_PUNCT_FOLD = str.maketrans(
+    {
+        "\u2018": "'",  # left single quote
+        "\u2019": "'",  # right single quote
+        "\u02bc": "'",  # modifier letter apostrophe
+        "\u2032": "'",  # prime
+        "\u201c": '"',  # left double quote
+        "\u201d": '"',  # right double quote
+        "\u2033": '"',  # double prime
+    }
+)
 
-    MusicBrainz release-group id when we have one, otherwise a normalized
-    artist+album pair. The fallback is a heuristic: it merges distinct
-    pressings that share artist and album title, which is the requested
-    "one release per work" behaviour but will occasionally be wrong.
+
+def _norm_text(s: str) -> str:
+    """Case-fold and Unicode-normalize a field for grouping.
+
+    NFKC maps full-width forms and compatibility variants onto their plain
+    shapes, and `_PUNCT_FOLD` handles the typographic quotes NFKC leaves
+    alone, so a release tagged two ways by different sources groups together
+    instead of being cloned twice.
+    """
+    s = unicodedata.normalize("NFKC", s or "")
+    return s.translate(_PUNCT_FOLD).strip().casefold()
+
+
+def _keys(album) -> tuple[str, str]:
+    """Both grouping identities for an album.
+
+    Returns ``(rg_key, name_key)``. An album that autotag matched carries a
+    release-group id; the same release from a source tree that was not matched
+    does not. Grouping on the rg id alone would therefore keep the matched and
+    unmatched copies of one work apart, so the two identities are unioned.
     """
     rgid = (album.get("mb_releasegroupid") or "").strip()
-    if rgid:
-        return "rg:" + rgid
-    artist = (album.albumartist or "").strip().casefold()
-    title = (album.album or "").strip().casefold()
-    return "name:" + artist + "\x00" + title
+    name = "name:" + _norm_text(album.albumartist) + "\x00" + _norm_text(album.album)
+    return ("rg:" + rgid) if rgid else name, name
+
+
+def _group_albums(albums):
+    """Group albums into works, unioning rg-id and artist+album identities."""
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Prefer an rg-key as the canonical root so groups read nicely.
+            root, other = (ra, rb) if ra.startswith("rg:") else (rb, ra)
+            parent[other] = root
+
+    for album in albums:
+        rg_key, name_key = _keys(album)
+        find(rg_key)
+        find(name_key)
+        union(rg_key, name_key)
+
+    groups: dict[str, list] = defaultdict(list)
+    for album in albums:
+        rg_key, name_key = _keys(album)
+        groups[find(rg_key)].append(album)
+    return groups
 
 
 def _rank(album):
@@ -171,27 +227,28 @@ class MusicOrganizePlugin(BeetsPlugin):
                 album_ids = {
                     item.album_id for item in lib.items(args) if item.album_id
                 }
-                albums = [
+                requested = [
                     a for a in (lib.get_album(i) for i in album_ids) if a
                 ]
-                # Scope to the requested albums, then re-scope *the group* to
-                # every other album sharing the same work identity. Without
-                # this, a per-album run sees exactly one candidate and can
-                # never collapse duplicates -- which is the whole point of the
-                # grouping. Grouping is the one operation that must be global.
-                keys = {_group_key(a) for a in albums}
+                # Scope to the requested albums, then pull in *every* album
+                # that shares a work identity with any of them, so the group
+                # is complete. Grouping is the one operation that must be
+                # global: a per-album run alone sees one candidate and can
+                # never collapse duplicates.
+                keys = set()
+                for a in requested:
+                    keys.update(_keys(a))
+                all_albums = list(lib.albums())
                 albums = [
                     a
-                    for a in lib.albums()
+                    for a in all_albums
                     if not any(i.get(SRC_ATTR) for i in a.items())
-                    or _group_key(a) in keys
+                    or keys & set(_keys(a))
                 ]
             else:
                 albums = list(lib.albums())
 
-            groups = defaultdict(list)
-            for album in albums:
-                groups[_group_key(album)].append(album)
+            groups = _group_albums(albums)
 
             organized = 0
             skipped = 0
@@ -217,7 +274,9 @@ class MusicOrganizePlugin(BeetsPlugin):
                         item[GROUP_ATTR] = key
                         item.store()
                     if not dry_run:
-                        pruned += self._prune_alternate(loser, dest_bytes)
+                        pruned += self._prune_alternate(
+                            loser, dest_bytes, lib.directory
+                        )
 
                 organized += 1 if moved else 0
                 skipped += 0 if moved else 1
@@ -278,7 +337,7 @@ class MusicOrganizePlugin(BeetsPlugin):
             moved = True
         return moved
 
-    def _prune_alternate(self, album, dest_bytes) -> int:
+    def _prune_alternate(self, album, dest_bytes, libdir) -> int:
         """Remove a losing release's *destination* copies, if any.
 
         A loser is normally un-cloned. But a release can be organized as a
@@ -286,21 +345,44 @@ class MusicOrganizePlugin(BeetsPlugin):
         copies in the destination. Those must go, or the library holds more
         than one release per work.
 
+        Item paths are stored *relative to the library directory*, so they
+        must be resolved against it before any comparison -- a bare
+        `realpath()` would resolve them against the process's cwd.
+
         The guard is absolute: only files that resolve *under the destination*
         are ever removed, so a source file cannot be touched even if the
         database says something odd.
         """
         removed = 0
+        # `dest_bytes` and `libdir` are bytestrings (normpath's return), so
+        # the separator must be encoded -- mixing them is a TypeError.
+        root = os.path.realpath(dest_bytes) + os.fsencode(os.sep)
+        libdir = os.fsencode(libdir)
         for item in album.items():
-            src = item.get(SRC_ATTR)
-            if not src:
+            if not item.get(SRC_ATTR):
                 continue  # never cloned -> nothing in the destination
-            real = os.path.realpath(item.path)
-            if not real.startswith(os.path.realpath(dest_bytes) + os.sep):
+            path = item.path
+            if not os.path.isabs(path):
+                path = os.path.join(libdir, path)
+            real = os.path.realpath(path)
+            if not real.startswith(root):
                 continue
             try:
                 os.unlink(real)
                 removed += 1
+            except FileNotFoundError:
+                # Already pruned by an earlier run; the row keeps its marker,
+                # so this is expected on every subsequent pass.
+                pass
             except OSError as exc:
                 self._log.warning("could not remove {}: {}", real, exc)
+
+            # A loser's album directory is left empty once its files go.
+            parent = os.path.dirname(real)
+            while parent.startswith(root) and parent != root.rstrip(os.sep):
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    break  # not empty, or already gone
+                parent = os.path.dirname(parent)
         return removed
