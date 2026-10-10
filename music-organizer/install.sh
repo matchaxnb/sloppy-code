@@ -66,6 +66,9 @@ echo "  systemctl --user daemon-reload"
 echo "  systemctl --user enable --now music-organizer-index.timer"
 echo "  systemctl --user list-timers music-organizer-index.timer"
 echo
+echo "A *user* timer only fires while a session exists unless lingering is on:"
+echo "  sudo loginctl enable-linger \$USER"
+echo
 echo "first run by hand (index only; sources are never written):"
 echo "  BEETSDIR=$PREFIX PYTHONPATH=$PREFIX/shim \\"
 echo "    $VENV/bin/beet -c $PREFIX/config.yaml import -C -W \\"

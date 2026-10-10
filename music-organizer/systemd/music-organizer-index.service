@@ -16,7 +16,12 @@ Environment=BEETSDIR=/home/omp-agent/music-organizer
 # Index phase: copy off, write off -> tags/MB matches go to the DB only and
 # no source file is ever modified. Incremental, so re-runs are cheap and
 # already-indexed directories make zero API calls.
-ExecStart=/home/omp-agent/music-organizer/.venv/bin/beet \
+#
+# flock guards against overlapping with a manual run: two concurrent imports
+# would duplicate MusicBrainz work and fight over the library. `-n` exits
+# immediately rather than queueing a second full pass behind the first.
+ExecStart=/usr/bin/flock -n /home/omp-agent/music-organizer/.index.lock \
+    /home/omp-agent/music-organizer/.venv/bin/beet \
     -c /home/omp-agent/music-organizer/config.yaml \
     import -C -W \
     /mnt/largepool/bulk/Music/CleanFLAC \
