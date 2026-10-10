@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Full run for the music library.
+# Full run for the music library: index and curate one top-level album at a
+# time, so the library fills progressively and a partial run still leaves a
+# populated, consistent library.
 #
 #   tmux new-session -d -s mo "~/music-organizer/run-full.sh > /tmp/mo-run.log 2>&1"
 #
-# Two passes, and that order is deliberate: a reflink of a file that is *also*
-# imported in the same run gets its source rewritten in place by beets'
-# tag write, which would (a) touch a source we promised never to touch and
-# (b) break the clone's sign-off. Indexing first — with `-C -W`, so nothing is
-# copied or written — and cloning afterwards keeps the source read-only for the
-# whole run.
+# Why per-album is safe for the sources: the import runs with `-C -W`, so it
+# copies nothing and writes no tags; the only tag write in the whole pipeline
+# is `musicorganize` writing to the clone it just created. Ordering index before
+# clone for each album therefore cannot reach a source file.
 #
 # Resumable: beets' import history plus the plugin's `mo_source` attribute mean
 # a re-run skips finished work. Safe to kill at any point.
@@ -24,12 +24,22 @@ M=/mnt/largepool/bulk/Music
 
 log() { printf '%s %s\n' "$(date -Is)" "$*"; }
 
-log "=== INDEX start ==="
-"$V" -c "$C" import -C -W "$M/CleanFLAC" "$M/VGM" "$M/CleanMP3"
-log "=== INDEX done ==="
+run_source() {
+    local root="$1" n=0 total
+    total=$(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 | tr -dc '\0' | wc -c)
+    log "=== $root ($total albums) ==="
+    while IFS= read -r -d '' album; do
+        n=$((n + 1))
+        log "[$n/$total] ${album#"$root"/}"
+        "$V" -c "$C" import -C -W "$album" 2>&1 |
+            grep -viE "backup|^$" | sed 's/^/    /'
+        "$V" -c "$C" musicorganize -- "$album" 2>&1 | sed 's/^/    /'
+    done < <(find "$root" -mindepth 1 -maxdepth 1 -type d -print0 | sort -z)
+    log "=== $root done ($n albums) ==="
+}
 
-log "=== ORGANIZE start ==="
-"$V" -c "$C" musicorganize
-log "=== ORGANIZE done ==="
+run_source "$M/CleanFLAC"
+run_source "$M/VGM"
+run_source "$M/CleanMP3"
 
 log "ALL DONE"

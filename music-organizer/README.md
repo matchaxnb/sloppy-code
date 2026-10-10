@@ -179,12 +179,36 @@ without being cloned.
 
 ## Verifying it did not cost space, and did not touch a source
 
+**`stat %b` cannot tell you whether a clone is sharing blocks.** The honest
+measurement is a **dataset-scoped `used` delta**:
+
 ```sh
 # on the host that owns the pool (the container has no `zfs`)
 zfs get -Hp -o value used /mnt/largepool/bulk     # before / after -> delta ~0
-
-# a clone's blocks are shared, so it reports almost no blocks of its own
-stat -c '%n size=%s blocks=%b' <clone> <source>
 ```
 
-Measured on this pool: source `blocks=33504`, the FICLONE clone `blocks=1`.
+That trap cost a real debugging session here, so it is worth stating plainly.
+A just-created clone reports `st_blocks=1`:
+
+```
+immediate blocks: 1
+t+30s   blocks: 48582      <-- after the next txg commits
+source  blocks: 48582
+```
+
+ZFS reports **referenced**, not charged/shared, blocks once the transaction
+group commits, so `stat`, `du` and `ls -s` converge on the full size whether or
+not the data is shared. Observing `blocks == size/512` therefore proves nothing.
+
+What *is* conclusive from inside the container is that the clone was made by
+FICLONE and not by the copy fallback: `beets.util.reflink(..., fallback=False)`
+raises on failure, so a returned clone is genuinely shared. The shim never
+falls back.
+
+Sources are verified untouched by hashing them before and after, or simply:
+
+```sh
+find /mnt/largepool/bulk/Music/{CleanFLAC,VGM,CleanMP3} -type f -mmin -60
+```
+
+which must be empty.
